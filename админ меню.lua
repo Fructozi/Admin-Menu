@@ -1,0 +1,3152 @@
+﻿--[[
+    ClientMenu_executor.lua
+    Чисто клиентский скрипт для запуска через executor.
+	
+    - Открывается автоматически при запуске
+    - Открывается/закрывается по Insert
+    - Перетаскивается за верхнюю панель
+    - Крестик сверху справа полностью останавливает скрипт
+    - Слева вкладки: ME / Player / World / Бинды (внизу)
+    - Все настройки автоматически сохраняются при смерти персонажа
+      и восстанавливаются при следующем запуске скрипта
+
+    ==================== КАРТА ВКЛАДОК (номера строк) ====================
+    Visuals      - строка 1335 (визуальные эффекты освещения)
+    ME           - строка 1466 (скорость, прыжок, freecam, полёт, godmode и т.д.)
+    Player       - строка 1619 (список игроков, спектейт, телепорт к игроку)
+    World        - строка 1738 (время суток, ESP)
+    Разное       - строка 1929 (безлимитные прыжки, Slide Boost)
+    Танцы        - строка 1967 (эмоуты, анимации движения, свои ID)
+    Сохранения   - строка 2232 (сохранённые координаты)
+    Бинды        - строка 2422 (низ сайдбара, переназначаемые горячие клавиши)
+    Настройки    - строка 1284 (низ сайдбара, ниже Бинды: размер/прозрачность
+                   меню, шрифт, тема)
+
+    Примечание: номера строк актуальны на момент последней правки скрипта
+    и могут сместиться после следующих изменений.
+--]]
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+
+local player = Players.LocalPlayer
+
+-- ==================== Определение платформы (телефон/ПК) ====================
+-- TouchEnabled без MouseEnabled - надёжный признак чистого сенсорного
+-- устройства (телефон/планшет без подключённой мыши). Используется, чтобы
+-- сделать меню компактнее на телефоне.
+local isMobile = UserInputService.TouchEnabled and not UserInputService.MouseEnabled
+
+local MENU_WIDTH = isMobile and 340 or 460
+local MENU_HEIGHT = isMobile and 360 or 460
+
+-- ==================== Состояние скрипта ====================
+local running = true
+local connections = {}
+local addSavedPosition -- определяется позже, во вкладке "Сохранения"
+local topBar, closeButton, searchBox -- определяются в блоке "Верхняя панель" ниже, нужны дальше по файлу
+local setSlideBoostState -- определяется во вкладке "Разное", нужна в "Бинды" и в сохранении настроек
+
+-- ==================== GUI-контейнер ====================
+local function getGuiParent()
+    local ok, hui = pcall(function() return gethui() end)
+    if ok and hui then return hui end
+    local ok2, cg = pcall(function() return game:GetService("CoreGui") end)
+    if ok2 and cg then return cg end
+    return player:WaitForChild("PlayerGui")
+end
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "AdminMenuGui"
+screenGui.ResetOnSpawn = false
+screenGui.IgnoreGuiInset = true
+screenGui.Parent = getGuiParent()
+
+pcall(function()
+    if syn and syn.protect_gui then
+        syn.protect_gui(screenGui)
+    end
+end)
+
+-- ==================== Список активных функций (правый верхний угол экрана) ====================
+local statusHolder = Instance.new("Frame")
+statusHolder.Name = "ActiveFeaturesList"
+statusHolder.AnchorPoint = Vector2.new(1, 0)
+statusHolder.Position = UDim2.new(1, -14, 0, 14)
+statusHolder.Size = UDim2.new(0, 220, 0, 0)
+statusHolder.AutomaticSize = Enum.AutomaticSize.Y
+statusHolder.BackgroundTransparency = 1
+statusHolder.Parent = screenGui
+
+local statusLayout = Instance.new("UIListLayout")
+statusLayout.SortOrder = Enum.SortOrder.LayoutOrder
+statusLayout.HorizontalAlignment = Enum.HorizontalAlignment.Right
+statusLayout.Padding = UDim.new(0, 4)
+statusLayout.Parent = statusHolder
+
+local activeFeatures = {}
+local statusLabels = {}
+
+local function setFeatureStatus(name, active)
+    if active then
+        activeFeatures[name] = true
+        if not statusLabels[name] then
+            local lbl = Instance.new("TextLabel")
+            lbl.Name = name
+            lbl.AutomaticSize = Enum.AutomaticSize.X
+            lbl.Size = UDim2.new(0, 0, 0, 26)
+            lbl.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+            lbl.BackgroundTransparency = 0.5
+            lbl.Text = "  " .. name .. "  "
+            lbl.TextColor3 = Color3.fromRGB(255, 255, 255)
+            lbl.Font = Enum.Font.GothamBold
+            lbl.TextSize = 16
+            lbl.ZIndex = 2
+            lbl.Parent = statusHolder
+            Instance.new("UICorner", lbl).CornerRadius = UDim.new(0, 5)
+            local stroke = Instance.new("UIStroke")
+            stroke.Color = Color3.fromRGB(255, 255, 255)
+            stroke.Thickness = 1
+            stroke.Transparency = 0.6
+            stroke.Parent = lbl
+            statusLabels[name] = lbl
+        end
+    else
+        activeFeatures[name] = nil
+        if statusLabels[name] then
+            statusLabels[name]:Destroy()
+            statusLabels[name] = nil
+        end
+    end
+end
+
+-- ==================== Основной фрейм ====================
+local mainFrame = Instance.new("Frame")
+mainFrame.Name = "MainFrame"
+mainFrame.Size = UDim2.new(0, MENU_WIDTH, 0, MENU_HEIGHT)
+mainFrame.Position = UDim2.new(0.5, -MENU_WIDTH / 2, 0.5, -MENU_HEIGHT / 2)
+mainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+mainFrame.BorderSizePixel = 0
+mainFrame.ClipsDescendants = true
+mainFrame.Active = true
+mainFrame.Parent = screenGui
+Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 8)
+
+-- Отдельный UIScale под настройку "Размер меню" (вкладка "Настройки").
+-- Не путать с uiScale ниже в файле - тот отвечает за анимацию
+-- открытия/закрытия. Оба - дети mainFrame, их масштаб перемножается,
+-- поэтому они не мешают друг другу.
+local sizeUIScale = Instance.new("UIScale")
+sizeUIScale.Scale = 1
+sizeUIScale.Parent = mainFrame
+
+-- Контейнер для "Screen Stretch" (растяжение по X, например под 4:3) -
+-- топбар/сайдбар/страницы теперь лежат внутри него, а не прямо в mainFrame,
+-- чтобы растяжение не мешало UICorner и общей анимации открытия/закрытия.
+local stretchFrame = Instance.new("Frame")
+stretchFrame.Name = "StretchFrame"
+stretchFrame.Size = UDim2.new(1, 0, 1, 0)
+stretchFrame.BackgroundTransparency = 1
+stretchFrame.Parent = mainFrame
+
+-- ==================== Верхняя панель ====================
+-- Обёрнуто в do...end: почти все переменные внутри (topFix, menuIcon,
+-- title, coordsLabel, saveCoordsButton, searchIcon и т.д.) нужны только
+-- здесь. Исключения - topBar/closeButton/searchBox (forward-declared
+-- выше), они используются дальше по файлу (перетаскивание, остановка
+-- скрипта, поиск) - для них "local" не пишем, чтобы не создавать новую
+-- переменную поверх уже объявленной.
+do
+topBar = Instance.new("Frame")
+topBar.Size = UDim2.new(1, 0, 0, 72)
+topBar.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
+topBar.BorderSizePixel = 0
+topBar.ZIndex = 2
+topBar.Parent = stretchFrame
+Instance.new("UICorner", topBar).CornerRadius = UDim.new(0, 8)
+
+local topFix = Instance.new("Frame")
+topFix.Size = UDim2.new(1, 0, 0, 10)
+topFix.Position = UDim2.new(0, 0, 1, -10)
+topFix.BackgroundColor3 = topBar.BackgroundColor3
+topFix.BorderSizePixel = 0
+topFix.ZIndex = 1
+topFix.Parent = topBar
+
+-- Иконка слева от названия. rbxassetid://0 - заглушка: сам загрузи
+-- нужную картинку в Roblox (Studio -> Asset Manager, или сайт), получишь
+-- rbxassetid, и впиши его сюда одной строкой - Roblox-скрипт не может
+-- сам залить произвольный файл как ассет, это делается только вручную.
+-- Пока ID не вставлен, кружок закрашен акцентным цветом темы, чтобы
+-- место иконки было видно, а не пустым/прозрачным.
+local MENU_ICON_ASSET_ID = "rbxassetid://0"
+
+local menuIcon = Instance.new("ImageLabel")
+menuIcon.Size = UDim2.new(0, 28, 0, 28)
+menuIcon.Position = UDim2.new(0, 6, 0, 4)
+-- Убираем цвет фона и делаем его прозрачным, чтобы видеть, подгрузилась ли иконка
+menuIcon.BackgroundColor3 = Color3.fromRGB(255, 255, 255) 
+menuIcon.BackgroundTransparency = 1 
+local MENU_ICON_ASSET_ID = "rbxassetid://88173310341489"
+menuIcon.Image = MENU_ICON_ASSET_ID
+menuIcon.ScaleType = Enum.ScaleType.Crop
+menuIcon.ZIndex = 2
+menuIcon.Parent = topBar
+Instance.new("UICorner", menuIcon).CornerRadius = UDim.new(1, 0)
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(0, 106, 0, 36)
+title.Position = UDim2.new(0, 40, 0, 0)
+title.BackgroundTransparency = 1
+title.Text = "Admin Menu"
+title.TextColor3 = Color3.fromRGB(255, 255, 255)
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Font = Enum.Font.GothamBold
+title.TextSize = 16
+title.ZIndex = 2
+title.Parent = topBar
+
+local coordsLabel = Instance.new("TextLabel")
+coordsLabel.Size = UDim2.new(1, -278, 0, 36)
+coordsLabel.Position = UDim2.new(0, 154, 0, 0)
+coordsLabel.BackgroundTransparency = 1
+coordsLabel.Text = "X: 0 Y: 0 Z: 0"
+coordsLabel.TextColor3 = Color3.fromRGB(160, 160, 175)
+coordsLabel.TextXAlignment = Enum.TextXAlignment.Left
+coordsLabel.Font = Enum.Font.Gotham
+coordsLabel.TextSize = 13
+coordsLabel.ZIndex = 2
+coordsLabel.Parent = topBar
+
+local coordsConn = RunService.Heartbeat:Connect(function()
+    local character = player.Character
+    local hrp = character and character:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        local pos = hrp.Position
+        coordsLabel.Text = string.format("X: %d Y: %d Z: %d", pos.X, pos.Y, pos.Z)
+    end
+end)
+table.insert(connections, coordsConn)
+
+local saveCoordsButton = Instance.new("TextButton")
+saveCoordsButton.Size = UDim2.new(0, 76, 0, 24)
+saveCoordsButton.Position = UDim2.new(1, -118, 0, 6)
+saveCoordsButton.BackgroundColor3 = Color3.fromRGB(60, 120, 90)
+saveCoordsButton.Text = "Сохранить"
+saveCoordsButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+saveCoordsButton.Font = Enum.Font.GothamBold
+saveCoordsButton.TextSize = 12
+saveCoordsButton.ZIndex = 2
+saveCoordsButton.Parent = topBar
+Instance.new("UICorner", saveCoordsButton).CornerRadius = UDim.new(0, 5)
+
+saveCoordsButton.MouseButton1Click:Connect(function()
+    local character = player.Character
+    local hrp = character and character:FindFirstChild("HumanoidRootPart")
+    if hrp and addSavedPosition then
+        addSavedPosition(hrp.Position)
+    end
+end)
+
+closeButton = Instance.new("TextButton")
+closeButton.Size = UDim2.new(0, 28, 0, 28)
+closeButton.Position = UDim2.new(1, -32, 0, 4)
+closeButton.BackgroundColor3 = Color3.fromRGB(200, 60, 60)
+closeButton.Text = "X"
+closeButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+closeButton.Font = Enum.Font.GothamBold
+closeButton.TextSize = 16
+closeButton.ZIndex = 3
+closeButton.Parent = topBar
+Instance.new("UICorner", closeButton).CornerRadius = UDim.new(0, 6)
+
+-- Вторая строка топбара - поиск. Сама логика фильтрации подключается
+-- ниже по файлу (после того как определены реестры строк/вкладок) -
+-- здесь только создание визуальных элементов.
+local searchIcon = Instance.new("TextLabel")
+searchIcon.Size = UDim2.new(0, 20, 0, 24)
+searchIcon.Position = UDim2.new(0, 10, 0, 40)
+searchIcon.BackgroundTransparency = 1
+searchIcon.Text = "🔍"
+searchIcon.TextColor3 = Color3.fromRGB(160, 160, 175)
+searchIcon.TextSize = 14
+searchIcon.ZIndex = 2
+searchIcon.Parent = topBar
+
+searchBox = Instance.new("TextBox")
+searchBox.Size = UDim2.new(1, -44, 0, 24)
+searchBox.Position = UDim2.new(0, 32, 0, 40)
+searchBox.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+searchBox.PlaceholderText = "Search..."
+searchBox.Text = ""
+searchBox.TextColor3 = Color3.fromRGB(230, 230, 230)
+searchBox.Font = Enum.Font.Gotham
+searchBox.TextSize = 13
+searchBox.ClearTextOnFocus = false
+searchBox.TextXAlignment = Enum.TextXAlignment.Left
+searchBox.ZIndex = 2
+searchBox.Parent = topBar
+Instance.new("UICorner", searchBox).CornerRadius = UDim.new(0, 5)
+local searchBoxPadding = Instance.new("UIPadding")
+searchBoxPadding.PaddingLeft = UDim.new(0, 8)
+searchBoxPadding.Parent = searchBox
+end -- конец do-блока "Верхняя панель"
+
+-- ==================== Левая панель вкладок ====================
+local tabBar = Instance.new("Frame")
+tabBar.Size = UDim2.new(0, 110, 1, -72)
+tabBar.Position = UDim2.new(0, -8, 1, -390)
+tabBar.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
+tabBar.BorderSizePixel = 0
+tabBar.Parent = stretchFrame
+
+local topTabsHolder = Instance.new("Frame")
+topTabsHolder.Size = UDim2.new(1, 10, 1, -96)
+topTabsHolder.BackgroundTransparency = 1
+topTabsHolder.Parent = tabBar
+local tabListTop = Instance.new("UIListLayout")
+tabListTop.Padding = UDim.new(0, 4)
+tabListTop.SortOrder = Enum.SortOrder.LayoutOrder
+tabListTop.Parent = topTabsHolder
+
+-- ==================== Полоска  ====================
+do
+    local divider = Instance.new("Frame")
+    divider.Size = UDim2.new(1, -8, 0, 5)
+    divider.Position = UDim2.new(0, 8, 1, -110)
+    divider.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+    divider.BorderSizePixel = 0
+    divider.Parent = tabBar
+end
+
+-- ==================== Дальше Левая Панель Вкладок ====================
+
+local bottomTabsHolder = Instance.new("Frame")
+bottomTabsHolder.Size = UDim2.new(1, 10, 0, 72)
+bottomTabsHolder.Position = UDim2.new(0, 0, 1, -96)
+bottomTabsHolder.BackgroundTransparency = 1
+bottomTabsHolder.Parent = tabBar
+local tabListBottom = Instance.new("UIListLayout")
+tabListBottom.Padding = UDim.new(0, 4)
+tabListBottom.SortOrder = Enum.SortOrder.LayoutOrder
+tabListBottom.Parent = bottomTabsHolder
+
+
+
+-- Статус-строка внизу сайдбара (как "Session 00:20 — 240 FPS" на референсе)
+do
+local sessionStartTime = os.clock()
+local statusLine = Instance.new("TextLabel")
+statusLine.Size = UDim2.new(1, -12, 0, 16)
+statusLine.Position = UDim2.new(0, 6, 1, -18)
+statusLine.BackgroundTransparency = 1
+statusLine.Text = "Session 00:00 — 0 FPS"
+statusLine.TextColor3 = Color3.fromRGB(130, 130, 140)
+statusLine.Font = Enum.Font.Gotham
+statusLine.TextSize = 11
+statusLine.TextXAlignment = Enum.TextXAlignment.Left
+statusLine.Parent = tabBar
+
+local lastFpsUpdate = 0
+local fpsFrameCount = 0
+local currentFps = 0
+local statusLineConn = RunService.Heartbeat:Connect(function(dt)
+    fpsFrameCount = fpsFrameCount + 1
+    local now = os.clock()
+    if now - lastFpsUpdate >= 1 then
+        currentFps = fpsFrameCount
+        fpsFrameCount = 0
+        lastFpsUpdate = now
+    end
+
+    local elapsed = math.floor(now - sessionStartTime)
+    local minutes = math.floor(elapsed / 60)
+    local seconds = elapsed % 60
+    statusLine.Text = string.format("Session %02d:%02d — %d FPS", minutes, seconds, currentFps)
+end)
+table.insert(connections, statusLineConn)
+end -- конец do-блока статус-строки
+
+-- ==================== Область содержимого ====================
+local pagesHolder = Instance.new("Frame")
+pagesHolder.Size = UDim2.new(1, -118, 1, -80)
+pagesHolder.Position = UDim2.new(0, 114, 0, 76)
+pagesHolder.BackgroundTransparency = 1
+pagesHolder.Parent = stretchFrame
+
+-- ==================== Утилиты для вкладок/UI ====================
+local tabs = {}
+local activeTab = nil
+
+-- ==================== Темы и шрифт (для вкладки "Настройки") ====================
+-- Тема №1 специально совпадает с уже существующими жёстко заданными
+-- цветами (панели 45,45,50 / акцент 90,90,210 / фон 30,30,35), поэтому
+-- ничего не меняется внешне, пока не переключишь тему во вкладке "Настройки".
+local themes = {
+    { name = "Фиолетовая", accent = Color3.fromRGB(90, 90, 210), bg = Color3.fromRGB(30, 30, 35), panel = Color3.fromRGB(45, 45, 50) },
+    { name = "Синяя",      accent = Color3.fromRGB(50, 140, 230), bg = Color3.fromRGB(24, 28, 34), panel = Color3.fromRGB(38, 44, 52) },
+    { name = "Зелёная",    accent = Color3.fromRGB(60, 190, 120), bg = Color3.fromRGB(24, 32, 28), panel = Color3.fromRGB(38, 50, 44) },
+    { name = "Огненная",   accent = Color3.fromRGB(235, 110, 60), bg = Color3.fromRGB(34, 26, 24), panel = Color3.fromRGB(52, 40, 36) },
+}
+local currentTheme = themes[1]
+local currentFont = Enum.Font.Gotham
+
+-- Одна таблица вместо 4 отдельных local-переменных - экономит регистры
+-- Luau (лимит 200 local на весь скрипт мы уже упирались раньше).
+local themeRegistry = {
+    bg = { mainFrame },  -- главный фон окна
+    panels = {},         -- фоны строк (createRow) - перекрашиваются при смене темы
+    accents = {},        -- активная вкладка / заливка слайдеров
+    fonted = {},          -- текстовые лейблы, меняющие шрифт вместе с настройкой
+    searchable = {},      -- {row=, label=, page=} - для строки поиска в топбаре
+}
+
+local function registerThemed(kind, obj)
+    table.insert(themeRegistry[kind], obj)
+    return obj
+end
+
+local function applyTheme()
+    for _, obj in ipairs(themeRegistry.bg) do
+        if obj and obj.Parent then obj.BackgroundColor3 = currentTheme.bg end
+    end
+    for _, obj in ipairs(themeRegistry.panels) do
+        if obj and obj.Parent then obj.BackgroundColor3 = currentTheme.panel end
+    end
+    for _, obj in ipairs(themeRegistry.accents) do
+        if obj and obj.Parent then obj.BackgroundColor3 = currentTheme.accent end
+    end
+    -- активная вкладка тоже красится в акцент темы - без этого она
+    -- осталась бы в старом цвете до следующего переключения вкладки
+    for tabName, data in pairs(tabs) do
+        if tabName == activeTab then
+            data.button.BackgroundColor3 = currentTheme.accent
+        end
+    end
+end
+
+-- Поиск (строка ввода в топбаре) - фильтрует строки только текущей
+-- активной вкладки, по вхождению подстроки в текст лейбла (без учёта
+-- регистра). Кнопки без текста (createButtonRow) под фильтр не подпадают.
+searchBox:GetPropertyChangedSignal("Text"):Connect(function()
+    local query = searchBox.Text:lower()
+    local activePage = tabs[activeTab] and tabs[activeTab].page
+    if not activePage then return end
+
+    for _, entry in ipairs(themeRegistry.searchable) do
+        if entry.page == activePage then
+            local matches = (query == "") or entry.label.Text:lower():find(query, 1, true) ~= nil
+            entry.row.Visible = matches
+        end
+    end
+end)
+
+local function createTabButton(parent, name, order)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, -16, 0, 32)
+    btn.Position = UDim2.new(0, 8, 0, 0)
+    btn.LayoutOrder = order
+    btn.BackgroundColor3 = Color3.fromRGB(45, 45, 50)
+    btn.TextColor3 = Color3.fromRGB(230, 230, 230)
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 14
+    btn.Text = name
+    btn.Parent = parent
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+    return btn
+end
+
+local pageOrderCounters = setmetatable({}, { __mode = "k" })
+
+local function nextLayoutOrder(page)
+    local current = pageOrderCounters[page] or 0
+    current = current + 1
+    pageOrderCounters[page] = current
+    return current
+end
+
+local function createPage(name)
+    local page = Instance.new("ScrollingFrame")
+    page.Size = UDim2.new(1, 0, 1, 0)
+    page.BackgroundTransparency = 1
+    page.BorderSizePixel = 0
+    page.ScrollBarThickness = 4
+    page.CanvasSize = UDim2.new(0, 0, 0, 0)
+    page.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    page.Visible = false
+    page.Parent = pagesHolder
+    local layout = Instance.new("UIListLayout")
+    layout.Padding = UDim.new(0, 8)
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.Parent = page
+    return page
+end
+
+local function selectTab(name)
+    if activeTab == name then return end
+    activeTab = name
+    for tabName, data in pairs(tabs) do
+        local isActive = (tabName == name)
+        data.page.Visible = isActive
+        data.button.BackgroundColor3 = isActive
+            and currentTheme.accent
+            or currentTheme.panel
+    end
+end
+
+local function registerTab(holder, name, order)
+    local btn = createTabButton(holder, name, order)
+    local page = createPage(name)
+    tabs[name] = { button = btn, page = page }
+    btn.MouseButton1Click:Connect(function()
+        selectTab(name)
+    end)
+    return page
+end
+
+-- строка с заголовком (для контролов)
+local function createRow(parentPage, text, height)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, 0, 0, height or 30)
+    row.BackgroundColor3 = currentTheme.panel
+    row.LayoutOrder = nextLayoutOrder(parentPage)
+    row.Parent = parentPage
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 6)
+    registerThemed("panels", row)
+
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(0.6, -6, 1, 0)
+    label.Position = UDim2.new(0, 10, 0, 0)
+    label.BackgroundTransparency = 1
+    label.Text = text
+    label.TextColor3 = Color3.fromRGB(230, 230, 230)
+    label.Font = currentFont
+    label.TextSize = 14
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.TextScaled = true
+    label.Parent = row
+    registerThemed("fonted", label)
+    table.insert(themeRegistry.searchable, { row = row, label = label, page = parentPage })
+
+    return row
+end
+
+local function createToggleRow(parentPage, text, onToggle, statusName)
+    local row = createRow(parentPage, text)
+
+    local track = Instance.new("Frame")
+    track.Size = UDim2.new(0, 46, 0, 24)
+    track.Position = UDim2.new(1, -56, 0.5, -12)
+    track.BackgroundColor3 = Color3.fromRGB(70, 70, 78)
+    track.Parent = row
+    Instance.new("UICorner", track).CornerRadius = UDim.new(1, 0)
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0, 20, 0, 20)
+    knob.Position = UDim2.new(0, 2, 0.5, -10)
+    knob.BackgroundColor3 = Color3.fromRGB(230, 230, 230)
+    knob.Parent = track
+    Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
+
+    local hitButton = Instance.new("TextButton")
+    hitButton.Size = UDim2.new(1, 0, 1, 0)
+    hitButton.BackgroundTransparency = 1
+    hitButton.Text = ""
+    hitButton.Parent = track
+
+    local state = false
+
+    -- setState обновляет визуал переключателя и (по умолчанию) вызывает
+    -- onToggle; используется и самим переключателем, и биндами с вкладки
+    -- "Бинды", и загрузкой сохранённых настроек, чтобы всё оставалось
+    -- синхронизировано вне зависимости от источника переключения
+    local function setState(newState, fireCallback)
+        state = newState
+        local onColor = Color3.fromRGB(60, 190, 120)
+        local offColor = Color3.fromRGB(70, 70, 78)
+        TweenService:Create(track, TweenInfo.new(0.15), { BackgroundColor3 = state and onColor or offColor }):Play()
+        TweenService:Create(knob, TweenInfo.new(0.15), {
+            Position = state and UDim2.new(1, -22, 0.5, -10) or UDim2.new(0, 2, 0.5, -10)
+        }):Play()
+        if statusName then
+            setFeatureStatus(statusName, state)
+        end
+        if fireCallback ~= false then
+            onToggle(state)
+        end
+    end
+
+    local function toggle()
+        setState(not state)
+    end
+
+    local function getState()
+        return state
+    end
+
+    hitButton.MouseButton1Click:Connect(toggle)
+
+    return toggle, setState
+end
+
+local function createSliderRow(parentPage, text, min, max, default, onChange)
+    local row = createRow(parentPage, text, 46)
+
+    local valueLabel = Instance.new("TextLabel")
+    valueLabel.Size = UDim2.new(0, 40, 0, 16)
+    valueLabel.Position = UDim2.new(1, -46, 0, 4)
+    valueLabel.BackgroundTransparency = 1
+    valueLabel.Text = tostring(default)
+    valueLabel.TextColor3 = Color3.fromRGB(200, 200, 255)
+    valueLabel.Font = currentFont
+    valueLabel.TextSize = 12
+    valueLabel.Parent = row
+    registerThemed("fonted", valueLabel)
+
+    local track = Instance.new("Frame")
+    track.Size = UDim2.new(1, -20, 0, 6)
+    track.Position = UDim2.new(0, 10, 1, -14)
+    track.BackgroundColor3 = Color3.fromRGB(70, 70, 78)
+    track.Parent = row
+    Instance.new("UICorner", track).CornerRadius = UDim.new(1, 0)
+
+    local fill = Instance.new("Frame")
+    fill.BackgroundColor3 = currentTheme.accent
+    fill.Size = UDim2.new((default - min) / (max - min), 0, 1, 0)
+    fill.Parent = track
+    Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
+    registerThemed("accents", fill)
+
+    local dragging = false
+
+    local function setFromX(x)
+        local relative = math.clamp((x - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1)
+        local value = math.floor(min + (max - min) * relative)
+        fill.Size = UDim2.new(relative, 0, 1, 0)
+        valueLabel.Text = tostring(value)
+        onChange(value)
+    end
+
+    local downConn = track.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            setFromX(input.Position.X)
+        end
+    end)
+    table.insert(connections, downConn)
+
+    local upConn = UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+    table.insert(connections, upConn)
+
+    local moveConn = UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch) then
+            setFromX(input.Position.X)
+        end
+    end)
+    table.insert(connections, moveConn)
+
+    -- setValue позволяет кнопкам сброса, биндам и загрузке сохранённых
+    -- настроек двигать сам ползунок, а не только менять значение "за кулисами"
+    local function setValue(value, fireCallback)
+        value = math.clamp(value, min, max)
+        local relative = (value - min) / (max - min)
+        fill.Size = UDim2.new(relative, 0, 1, 0)
+        valueLabel.Text = tostring(value)
+        if fireCallback ~= false then
+            onChange(value)
+        end
+    end
+
+    return setValue
+end
+
+-- Слайдер с фиксированными точками остановки (снап к ближайшей точке)
+-- points: массив { {value = number, label = "текст"}, ... } отсортированный по value
+local function createSnapSliderRow(parentPage, text, points, defaultIndex, onChange)
+    local row = createRow(parentPage, text, 50)
+
+    local valueLabel = Instance.new("TextLabel")
+    valueLabel.Size = UDim2.new(0, 70, 0, 16)
+    valueLabel.Position = UDim2.new(1, -76, 0, 4)
+    valueLabel.BackgroundTransparency = 1
+    valueLabel.Text = points[defaultIndex].label
+    valueLabel.TextColor3 = Color3.fromRGB(200, 200, 255)
+    valueLabel.Font = Enum.Font.Gotham
+    valueLabel.TextSize = 12
+    valueLabel.TextXAlignment = Enum.TextXAlignment.Right
+    valueLabel.Parent = row
+
+    local track = Instance.new("Frame")
+    track.Size = UDim2.new(1, -20, 0, 6)
+    track.Position = UDim2.new(0, 10, 1, -18)
+    track.BackgroundColor3 = Color3.fromRGB(70, 70, 78)
+    track.Parent = row
+    Instance.new("UICorner", track).CornerRadius = UDim.new(1, 0)
+
+    local minVal = points[1].value
+    local maxVal = points[#points].value
+
+    local function relativeFor(value)
+        if maxVal == minVal then return 0 end
+        return (value - minVal) / (maxVal - minVal)
+    end
+
+    -- засечки на треке для каждой контрольной точки
+    for _, point in ipairs(points) do
+        local tick = Instance.new("Frame")
+        tick.Size = UDim2.new(0, 2, 0, 10)
+        tick.AnchorPoint = Vector2.new(0.5, 0.5)
+        tick.Position = UDim2.new(relativeFor(point.value), 0, 0.5, 0)
+        tick.BackgroundColor3 = Color3.fromRGB(120, 120, 130)
+        tick.BorderSizePixel = 0
+        tick.ZIndex = 2
+        tick.Parent = track
+    end
+
+    local fill = Instance.new("Frame")
+    fill.BackgroundColor3 = Color3.fromRGB(90, 90, 210)
+    fill.Size = UDim2.new(relativeFor(points[defaultIndex].value), 0, 1, 0)
+    fill.Parent = track
+    Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
+
+    local handle = Instance.new("Frame")
+    handle.Size = UDim2.new(0, 14, 0, 14)
+    handle.AnchorPoint = Vector2.new(0.5, 0.5)
+    handle.Position = UDim2.new(relativeFor(points[defaultIndex].value), 0, 0.5, 0)
+    handle.BackgroundColor3 = Color3.fromRGB(230, 230, 240)
+    handle.ZIndex = 3
+    handle.Parent = track
+    Instance.new("UICorner", handle).CornerRadius = UDim.new(1, 0)
+
+    local dragging = false
+
+    local function nearestPoint(relative)
+        local targetValue = minVal + (maxVal - minVal) * relative
+        local closest = points[1]
+        local closestDist = math.abs(points[1].value - targetValue)
+        for _, point in ipairs(points) do
+            local dist = math.abs(point.value - targetValue)
+            if dist < closestDist then
+                closest = point
+                closestDist = dist
+            end
+        end
+        return closest
+    end
+
+    local function setFromX(x)
+        local relative = math.clamp((x - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1)
+        local point = nearestPoint(relative)
+        local snappedRelative = relativeFor(point.value)
+
+        fill.Size = UDim2.new(snappedRelative, 0, 1, 0)
+        handle.Position = UDim2.new(snappedRelative, 0, 0.5, 0)
+        valueLabel.Text = point.label
+
+        onChange(point.value, point.label)
+    end
+
+    local downConn = track.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            setFromX(input.Position.X)
+        end
+    end)
+    table.insert(connections, downConn)
+
+    local upConn = UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+    table.insert(connections, upConn)
+
+    local moveConn = UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch) then
+            setFromX(input.Position.X)
+        end
+    end)
+    table.insert(connections, moveConn)
+
+    return row
+end
+
+-- Строка с раскрывающимся списком (аналог accordion-пикеров в "Танцы") -
+-- используется для выбора шрифта/темы во вкладке "Настройки".
+local function createDropdownRow(parentPage, text, options, defaultIndex, onSelect)
+    local row = createRow(parentPage, text, 32)
+
+    local selectedBtn = Instance.new("TextButton")
+    selectedBtn.Size = UDim2.new(0, 130, 0, 24)
+    selectedBtn.Position = UDim2.new(1, -140, 0.5, -12)
+    selectedBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+    selectedBtn.Text = options[defaultIndex].label .. " ▾"
+    selectedBtn.TextColor3 = Color3.fromRGB(230, 230, 230)
+    selectedBtn.Font = currentFont
+    selectedBtn.TextSize = 13
+    selectedBtn.Parent = row
+    Instance.new("UICorner", selectedBtn).CornerRadius = UDim.new(0, 5)
+    registerThemed("fonted", selectedBtn)
+
+    local optionsList = Instance.new("Frame")
+    optionsList.Size = UDim2.new(1, 0, 0, #options * 34)
+    optionsList.BackgroundTransparency = 1
+    optionsList.Visible = false
+    optionsList.LayoutOrder = nextLayoutOrder(parentPage)
+    optionsList.Parent = parentPage
+
+    local optionsLayout = Instance.new("UIListLayout")
+    optionsLayout.Padding = UDim.new(0, 4)
+    optionsLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    optionsLayout.Parent = optionsList
+
+    for _, option in ipairs(options) do
+        local optBtn = Instance.new("TextButton")
+        optBtn.Size = UDim2.new(1, -20, 0, 30)
+        optBtn.Position = UDim2.new(0, 20, 0, 0)
+        optBtn.BackgroundColor3 = currentTheme.panel
+        optBtn.Text = "• " .. option.label
+        optBtn.TextColor3 = Color3.fromRGB(220, 220, 230)
+        optBtn.Font = currentFont
+        optBtn.TextSize = 13
+        optBtn.TextXAlignment = Enum.TextXAlignment.Left
+        optBtn.Parent = optionsList
+        Instance.new("UICorner", optBtn).CornerRadius = UDim.new(0, 5)
+        registerThemed("panels", optBtn)
+        registerThemed("fonted", optBtn)
+
+        optBtn.MouseButton1Click:Connect(function()
+            selectedBtn.Text = option.label .. " ▾"
+            optionsList.Visible = false
+            onSelect(option)
+        end)
+    end
+
+    selectedBtn.MouseButton1Click:Connect(function()
+        optionsList.Visible = not optionsList.Visible
+    end)
+
+    return row
+end
+
+local function createButtonRow(parentPage, text, onClick)
+    local row = createRow(parentPage, "")
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, -16, 1, -8)
+    btn.Position = UDim2.new(0, 8, 0, 4)
+    btn.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+    btn.Text = text
+    btn.TextColor3 = Color3.fromRGB(230, 230, 230)
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 14
+    btn.Parent = row
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+    btn.MouseButton1Click:Connect(onClick)
+    return row
+end
+
+-- Строка с ручным вводом числа (например точное значение скорости/прыжка),
+-- применяется к уже существующему слайдеру через его setValue,
+-- поэтому сам ползунок тоже сдвигается
+local function createManualInputRow(parentPage, labelText, min, max, setSliderValue)
+    local row = createRow(parentPage, labelText, 40)
+
+    local inputBox = Instance.new("TextBox")
+    inputBox.Size = UDim2.new(0, 80, 0, 24)
+    inputBox.Position = UDim2.new(1, -168, 0.5, -12)
+    inputBox.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+    inputBox.PlaceholderText = tostring(min) .. "-" .. tostring(max)
+    inputBox.Text = ""
+    inputBox.TextColor3 = Color3.fromRGB(230, 230, 230)
+    inputBox.Font = Enum.Font.Gotham
+    inputBox.TextSize = 13
+    inputBox.ClearTextOnFocus = false
+    inputBox.Parent = row
+    Instance.new("UICorner", inputBox).CornerRadius = UDim.new(0, 5)
+
+    local applyBtn = Instance.new("TextButton")
+    applyBtn.Size = UDim2.new(0, 76, 0, 24)
+    applyBtn.Position = UDim2.new(1, -84, 0.5, -12)
+    applyBtn.BackgroundColor3 = Color3.fromRGB(90, 90, 210)
+    applyBtn.Text = "Применить"
+    applyBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    applyBtn.Font = Enum.Font.GothamBold
+    applyBtn.TextSize = 12
+    applyBtn.Parent = row
+    Instance.new("UICorner", applyBtn).CornerRadius = UDim.new(0, 5)
+
+    local function applyValue()
+        local value = tonumber(inputBox.Text)
+        if value then
+            value = math.clamp(math.floor(value), min, max)
+            setSliderValue(value)
+            inputBox.Text = tostring(value)
+        end
+    end
+
+    applyBtn.MouseButton1Click:Connect(applyValue)
+    inputBox.FocusLost:Connect(function(enterPressed)
+        if enterPressed then
+            applyValue()
+        end
+    end)
+
+    return row
+end
+
+-- ==================== Свободная камера (Freecam) ====================
+local freecamEnabled = false
+local freecamSpeed = 30
+local freecamHeld = {
+    [Enum.KeyCode.W] = Vector3.new(0, 0, -1),
+    [Enum.KeyCode.S] = Vector3.new(0, 0, 1),
+    [Enum.KeyCode.A] = Vector3.new(-1, 0, 0),
+    [Enum.KeyCode.D] = Vector3.new(1, 0, 0),
+    [Enum.KeyCode.Space] = Vector3.new(0, 1, 0),
+    [Enum.KeyCode.LeftControl] = Vector3.new(0, -1, 0),
+}
+local freecamRotating = false
+local freecamRenderConn, freecamInputBeganConn, freecamInputEndedConn, freecamMouseConn
+local freecamSavedWalkSpeed
+
+-- ---------- Кросс-платформенный фрикам ----------
+-- Раньше движение читалось напрямую из клавиш WASD/Space/Ctrl - на телефоне
+-- таких клавиш физически нет, поэтому фрикам не реагировал. Теперь
+-- горизонтальное движение берётся из Humanoid.MoveDirection - это готовый
+-- мировой вектор направления, который Roblox сам считает и от WASD на ПК,
+-- и от джойстика на телефоне, и от геймпада. Вертикаль (вверх) берётся из
+-- Humanoid.Jump - тоже true при удержании и Space, и кнопки прыжка на
+-- телефоне. Поворот камеры - зажатая ПКМ на ПК или просто палец на экране
+-- на телефоне (там нет отдельной кнопки "правая кнопка мыши").
+local function startFreecam()
+    local camera = workspace.CurrentCamera
+    camera.CameraType = Enum.CameraType.Scriptable
+
+    -- обнуляем скорость персонажа на время полёта, чтобы он не "бежал"
+    -- под камерой пока мы летаем в фрикаме
+    local character = player.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if humanoid then
+        freecamSavedWalkSpeed = humanoid.WalkSpeed
+        humanoid.WalkSpeed = 0
+    end
+
+    freecamInputBeganConn = UserInputService.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton2 then
+            freecamRotating = true
+            UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
+        elseif input.UserInputType == Enum.UserInputType.Touch then
+            freecamRotating = true
+        end
+    end)
+    table.insert(connections, freecamInputBeganConn)
+
+    freecamInputEndedConn = UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton2 then
+            freecamRotating = false
+            UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+        elseif input.UserInputType == Enum.UserInputType.Touch then
+            freecamRotating = false
+        end
+    end)
+    table.insert(connections, freecamInputEndedConn)
+
+    freecamMouseConn = UserInputService.InputChanged:Connect(function(input)
+        if not freecamRotating then return end
+        local delta
+        if input.UserInputType == Enum.UserInputType.MouseMovement then
+            delta = input.Delta
+        elseif input.UserInputType == Enum.UserInputType.Touch then
+            delta = input.Delta
+        else
+            return
+        end
+        local rx, ry, _ = camera.CFrame:ToOrientation()
+        rx = math.clamp(rx - delta.Y * 0.003, -math.rad(89), math.rad(89))
+        ry = ry - delta.X * 0.003
+        camera.CFrame = CFrame.new(camera.CFrame.Position) * CFrame.Angles(0, ry, 0) * CFrame.Angles(rx, 0, 0)
+    end)
+    table.insert(connections, freecamMouseConn)
+
+    freecamRenderConn = RunService.RenderStepped:Connect(function(dt)
+        local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+        if not hum then return end
+
+        local moveVector = hum.MoveDirection
+        local verticalSpeed = 0
+        if hum.Jump then verticalSpeed = verticalSpeed + freecamSpeed end
+        if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then verticalSpeed = verticalSpeed - freecamSpeed end
+
+        local totalMove = moveVector * freecamSpeed + Vector3.new(0, verticalSpeed, 0)
+        if totalMove.Magnitude > 0 then
+            camera.CFrame = camera.CFrame + totalMove * dt
+        end
+    end)
+    table.insert(connections, freecamRenderConn)
+end
+
+local function stopFreecam()
+    if freecamRenderConn then freecamRenderConn:Disconnect() freecamRenderConn = nil end
+    if freecamInputBeganConn then freecamInputBeganConn:Disconnect() freecamInputBeganConn = nil end
+    if freecamInputEndedConn then freecamInputEndedConn:Disconnect() freecamInputEndedConn = nil end
+    if freecamMouseConn then freecamMouseConn:Disconnect() freecamMouseConn = nil end
+    freecamRotating = false
+    UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+
+    local camera = workspace.CurrentCamera
+    camera.CameraType = Enum.CameraType.Custom
+    local character = player.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if humanoid then
+        camera.CameraSubject = humanoid
+        if freecamSavedWalkSpeed then
+            humanoid.WalkSpeed = freecamSavedWalkSpeed
+        end
+    end
+    freecamSavedWalkSpeed = nil
+end
+
+local function toggleFreecam(state)
+    freecamEnabled = state
+    if freecamEnabled then
+        startFreecam()
+    else
+        stopFreecam()
+    end
+end
+
+-- ==================== Неуязвимость (godmode) ====================
+local godmodeEnabled = false
+local godmodeConn
+
+local function applyGodmode(character)
+    if godmodeConn then
+        godmodeConn:Disconnect()
+        godmodeConn = nil
+    end
+    if not godmodeEnabled then return end
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return end
+    humanoid.Health = humanoid.MaxHealth
+    godmodeConn = humanoid.HealthChanged:Connect(function(health)
+        if godmodeEnabled and health < humanoid.MaxHealth then
+            humanoid.Health = humanoid.MaxHealth
+        end
+    end)
+end
+
+local function setGodmode(state)
+    godmodeEnabled = state
+    applyGodmode(player.Character)
+end
+
+table.insert(connections, player.CharacterAdded:Connect(function(character)
+    if godmodeEnabled then
+        task.wait(0.2)
+        applyGodmode(character)
+    end
+end))
+
+-- ==================== Невидимость ====================
+local invisible = false
+
+local function applyInvisibility(character)
+    if not character then return end
+    for _, obj in ipairs(character:GetDescendants()) do
+        if obj:IsA("BasePart") then
+            if obj.Name ~= "HumanoidRootPart" then
+                obj.LocalTransparencyModifier = invisible and 1 or 0
+            end
+        elseif obj:IsA("Decal") then
+            obj.Transparency = invisible and 1 or 0
+        end
+    end
+end
+
+local invisibilityAnchorCFrame -- позиция, запомненная при включении невидимости
+
+local function setInvisible(state)
+    local character = player.Character
+    local hrp = character and character:FindFirstChild("HumanoidRootPart")
+
+    if state then
+        -- запоминаем точку, где находимся в момент включения
+        if hrp then
+            invisibilityAnchorCFrame = hrp.CFrame
+        end
+        invisible = true
+        applyInvisibility(character)
+    else
+        invisible = false
+        applyInvisibility(character)
+        -- при выключении возвращаемся туда, где были в момент включения
+        if hrp and invisibilityAnchorCFrame then
+            hrp.CFrame = invisibilityAnchorCFrame
+        end
+        invisibilityAnchorCFrame = nil
+    end
+end
+
+table.insert(connections, player.CharacterAdded:Connect(function(character)
+    if invisible then
+        task.wait(0.2)
+        applyInvisibility(character)
+    end
+end))
+
+-- ==================== Ноуклип ====================
+local noclipEnabled = false
+
+local function applyNoclip(character)
+    if not character then return end
+    for _, obj in ipairs(character:GetDescendants()) do
+        if obj:IsA("BasePart") then
+            obj.CanCollide = not noclipEnabled
+        end
+    end
+end
+
+local function setNoclip(state)
+    noclipEnabled = state
+    applyNoclip(player.Character)
+end
+
+-- постоянно поддерживает CanCollide = false, чтобы новые части
+-- персонажа (например, надетые аксессуары) тоже не сталкивались
+local noclipStepConn = RunService.Stepped:Connect(function()
+    if not noclipEnabled then return end
+    local character = player.Character
+    if not character then return end
+    for _, obj in ipairs(character:GetDescendants()) do
+        if obj:IsA("BasePart") and obj.CanCollide then
+            obj.CanCollide = false
+        end
+    end
+end)
+table.insert(connections, noclipStepConn)
+
+table.insert(connections, player.CharacterAdded:Connect(function(character)
+    if noclipEnabled then
+        task.wait(0.2)
+        applyNoclip(character)
+    end
+end))
+
+-- ==================== Полёт ====================
+local flyEnabled = false
+local flySpeed = 50
+local flyVelocity, flyGyro
+local flyRenderConn, flyInputBeganConn, flyInputEndedConn
+
+-- Только для ПК: набор сырых клавиш, как было изначально
+local flyHeld = {
+    [Enum.KeyCode.W] = Vector3.new(0, 0, -1),
+    [Enum.KeyCode.S] = Vector3.new(0, 0, 1),
+    [Enum.KeyCode.A] = Vector3.new(-1, 0, 0),
+    [Enum.KeyCode.D] = Vector3.new(1, 0, 0),
+    [Enum.KeyCode.Space] = Vector3.new(0, 1, 0),
+    [Enum.KeyCode.LeftControl] = Vector3.new(0, -1, 0),
+}
+local flyKeysDown = {}
+
+local function stopFly()
+    if flyRenderConn then flyRenderConn:Disconnect() flyRenderConn = nil end
+    if flyInputBeganConn then flyInputBeganConn:Disconnect() flyInputBeganConn = nil end
+    if flyInputEndedConn then flyInputEndedConn:Disconnect() flyInputEndedConn = nil end
+    flyKeysDown = {}
+
+    if flyVelocity then flyVelocity:Destroy() flyVelocity = nil end
+    if flyGyro then flyGyro:Destroy() flyGyro = nil end
+
+    local character = player.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if humanoid then
+        humanoid.PlatformStand = false
+    end
+end
+
+-- ---------- Полёт: ПК - точно как было раньше (сырые клавиши WASD/Space/Ctrl),
+-- телефон - через Humanoid.MoveDirection/Jump (на телефоне физических
+-- клавиш нет). Ветвление по isMobile, определённому в начале скрипта.
+local function startFly()
+    stopFly() -- на случай повторного запуска без остановки
+
+    local character = player.Character or player.CharacterAdded:Wait()
+    local hrp = character:FindFirstChild("HumanoidRootPart")
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    if not hrp or not humanoid then return end
+
+    humanoid.PlatformStand = true
+
+    flyVelocity = Instance.new("BodyVelocity")
+    flyVelocity.Name = "FlyVelocity"
+    flyVelocity.MaxForce = Vector3.new(1e5, 1e5, 1e5)
+    flyVelocity.Velocity = Vector3.new(0, 0, 0)
+    flyVelocity.Parent = hrp
+
+    flyGyro = Instance.new("BodyGyro")
+    flyGyro.Name = "FlyGyro"
+    flyGyro.MaxTorque = Vector3.new(1e5, 1e5, 1e5)
+    flyGyro.P = 3000
+    flyGyro.D = 200
+    flyGyro.CFrame = hrp.CFrame
+    flyGyro.Parent = hrp
+
+    if isMobile then
+        -- ---------- Телефон: MoveDirection + Jump ----------
+        flyRenderConn = RunService.RenderStepped:Connect(function()
+            if not flyVelocity or not flyGyro or not hrp.Parent then return end
+            local camera = workspace.CurrentCamera
+
+            local moveVector = humanoid.MoveDirection
+            local verticalSpeed = 0
+            if humanoid.Jump then verticalSpeed = verticalSpeed + 1 end
+
+            local totalMove = moveVector
+            if totalMove.Magnitude > 0 then
+                totalMove = totalMove.Unit
+            end
+            totalMove = totalMove + Vector3.new(0, verticalSpeed, 0)
+
+            if totalMove.Magnitude > 0 then
+                flyVelocity.Velocity = totalMove.Unit * flySpeed
+            else
+                flyVelocity.Velocity = Vector3.new(0, 0, 0)
+            end
+
+            flyGyro.CFrame = CFrame.new(hrp.Position, hrp.Position + camera.CFrame.LookVector)
+        end)
+        table.insert(connections, flyRenderConn)
+    else
+        -- ---------- ПК: сырые клавиши, точно как было изначально ----------
+        flyInputBeganConn = UserInputService.InputBegan:Connect(function(input, gameProcessed)
+            if gameProcessed then return end
+            if flyHeld[input.KeyCode] then
+                flyKeysDown[input.KeyCode] = true
+            end
+        end)
+        table.insert(connections, flyInputBeganConn)
+
+        flyInputEndedConn = UserInputService.InputEnded:Connect(function(input)
+            if flyHeld[input.KeyCode] then
+                flyKeysDown[input.KeyCode] = nil
+            end
+        end)
+        table.insert(connections, flyInputEndedConn)
+
+        flyRenderConn = RunService.RenderStepped:Connect(function()
+            if not flyVelocity or not flyGyro or not hrp.Parent then return end
+            local camera = workspace.CurrentCamera
+            local moveVector = Vector3.new()
+            for key, dir in pairs(flyHeld) do
+                if flyKeysDown[key] then
+                    moveVector = moveVector + dir
+                end
+            end
+
+            if moveVector.Magnitude > 0 then
+                moveVector = moveVector.Unit
+                flyVelocity.Velocity = camera.CFrame:VectorToWorldSpace(moveVector) * flySpeed
+            else
+                flyVelocity.Velocity = Vector3.new(0, 0, 0)
+            end
+
+            flyGyro.CFrame = CFrame.new(hrp.Position, hrp.Position + camera.CFrame.LookVector)
+        end)
+        table.insert(connections, flyRenderConn)
+    end
+end
+
+local function toggleFly(state)
+    flyEnabled = state
+    if flyEnabled then
+        startFly()
+    else
+        stopFly()
+    end
+end
+
+
+table.insert(connections, player.CharacterAdded:Connect(function(character)
+    flyVelocity = nil
+    flyGyro = nil
+    if flyEnabled then
+        task.wait(0.3)
+        startFly()
+    end
+end))
+
+-- ==================== Вкладка Настройки ====================
+do
+    local settingsPage = registerTab(bottomTabsHolder, "Настройки", 2)
+
+    -- Размер меню
+    createSliderRow(settingsPage, "Размер меню", 60, 150, 100, function(value)
+        sizeUIScale.Scale = value / 100
+    end)
+
+    -- Прозрачность меню
+    createSliderRow(settingsPage, "Прозрачность меню", 0, 100, 0, function(value)
+        local t = value / 100
+        mainFrame.BackgroundTransparency = t
+        for _, obj in ipairs(themeRegistry.panels) do
+            if obj and obj.Parent then obj.BackgroundTransparency = t end
+        end
+    end)
+
+    -- Комплексная кнопка оптимизации (Toggle FPS Boost с сохранением настроек)
+    local isOptimized = false
+    local originalSettings = {} -- Сюда сохраняем состояние объектов
+
+    createButtonRow(settingsPage, "Toggle FPS Boost", function()
+        isOptimized = not isOptimized
+        local Lighting = game:GetService("Lighting")
+        local Terrain = workspace:FindFirstChildOfClass("Terrain")
+
+        if isOptimized then
+            -- СОХРАНЯЕМ ИСХОДНОЕ СОСТОЯНИЕ
+            originalSettings.LightingShadows = Lighting.GlobalShadows
+            
+            -- Применяем оптимизацию
+            Lighting.GlobalShadows = false
+            for _, obj in pairs(workspace:GetDescendants()) do
+                if obj:IsA("BasePart") then
+                    originalSettings[obj] = obj.Material -- Запоминаем старый материал
+                    obj.Material = Enum.Material.Plastic
+                end
+                if obj:IsA("ParticleEmitter") or obj:IsA("Fire") or obj:IsA("Smoke") or obj:IsA("Sparkles") then
+                    obj.Enabled = false
+                end
+            end
+        else
+            -- ВОЗВРАЩАЕМ КАК БЫЛО
+            Lighting.GlobalShadows = originalSettings.LightingShadows
+            for _, obj in pairs(workspace:GetDescendants()) do
+                if obj:IsA("BasePart") and originalSettings[obj] then
+                    obj.Material = originalSettings[obj] -- Возвращаем старый материал
+                end
+                if obj:IsA("ParticleEmitter") or obj:IsA("Fire") or obj:IsA("Smoke") or obj:IsA("Sparkles") then
+                    obj.Enabled = true
+                end
+            end
+            originalSettings = {} -- Очищаем память
+        end
+        print(isOptimized and "Оптимизация включена" or "Оптимизация выключена (настройки восстановлены)")
+    end)
+
+    -- Шрифт меню
+    local fontOptions = {
+        { label = "Gotham", font = Enum.Font.Gotham },
+        { label = "Gotham Bold", font = Enum.Font.GothamBold },
+        { label = "Source Sans", font = Enum.Font.SourceSans },
+        { label = "Roboto", font = Enum.Font.Roboto },
+    }
+
+    createDropdownRow(settingsPage, "Шрифт меню", fontOptions, 1, function(option)
+        currentFont = option.font
+        for _, lbl in ipairs(themeRegistry.fonted) do
+            if lbl and lbl.Parent then lbl.Font = currentFont end
+        end
+    end)
+
+    -- Тема меню
+    local themeOptions = {}
+    for i, theme in ipairs(themes) do
+        themeOptions[i] = { label = theme.name, theme = theme }
+    end
+
+    createDropdownRow(settingsPage, "Тема меню", themeOptions, 1, function(option)
+        currentTheme = option.theme
+        applyTheme()
+    end)
+end -- конец do-блока "Настройки"
+
+-- ==================== Вкладка VISUALS ====================
+do
+local visualsPage = registerTab(topTabsHolder, "Visuals", 2)
+
+-- ==================== Visual Effects ====================
+
+local Lighting = game:GetService("Lighting")
+
+local function Clean()
+    for _, v in pairs(Lighting:GetChildren()) do
+        if v:IsA("ColorCorrectionEffect")
+        or v:IsA("BloomEffect")
+        or v:IsA("SunRaysEffect")
+        or v:IsA("BlurEffect") then
+            v:Destroy()
+        end
+    end
+end
+
+local function FX(effectName, properties)
+    local effect = Instance.new(effectName)
+    for prop, value in pairs(properties) do
+        effect[prop] = value
+    end
+    effect.Parent = Lighting
+end
+
+createButtonRow(visualsPage, "❌ Убрать все эффекты", function()
+    Clean()
+end)
+
+createButtonRow(visualsPage, "Ultra RTX", function()
+    Clean()
+    FX("ColorCorrectionEffect", {
+        Saturation = 0.2,
+        Contrast = 0.2
+    })
+    FX("BloomEffect", {
+        Intensity = 0.5
+    })
+    FX("SunRaysEffect", {
+        Intensity = 0.1
+    })
+end)
+
+
+createButtonRow(visualsPage, "Vivid Life (Сочно)", function()
+    Clean()
+    FX("ColorCorrectionEffect", {
+        Saturation = 1.5
+    })
+end)
+
+
+createButtonRow(visualsPage, "Soft Dream", function()
+    Clean()
+    FX("BloomEffect", {
+        Intensity = 1,
+        Size = 50
+    })
+end)
+
+
+createButtonRow(visualsPage, "Cold Morning", function()
+    Clean()
+    Lighting.ClockTime = 7
+    FX("ColorCorrectionEffect", {
+        TintColor = Color3.fromRGB(200,230,255)
+    })
+end)
+
+
+createButtonRow(visualsPage, "Golden Hour", function()
+    Clean()
+    Lighting.ClockTime = 17.5
+    FX("ColorCorrectionEffect", {
+        Saturation = 0.5
+    })
+end)
+
+
+createButtonRow(visualsPage, "Cinematic 4K", function()
+    Clean()
+    FX("ColorCorrectionEffect", {
+        Contrast = 0.4,
+        Saturation = 0.1
+    })
+end)
+
+
+createButtonRow(visualsPage, "Summer Heat", function()
+    Clean()
+    Lighting.Brightness = 4
+    FX("ColorCorrectionEffect", {
+        TintColor = Color3.fromRGB(255,240,200)
+    })
+end)
+
+
+createButtonRow(visualsPage, "Deep Shadows", function()
+    Clean()
+    Lighting.GlobalShadows = true
+    FX("ColorCorrectionEffect", {
+        Contrast = 0.6
+    })
+end)
+
+
+createButtonRow(visualsPage, "Bright Night", function()
+    Clean()
+    Lighting.ClockTime = 0
+    Lighting.Brightness = 5
+end)
+
+
+createButtonRow(visualsPage, "Pink Sky", function()
+    Clean()
+    FX("ColorCorrectionEffect", {
+        TintColor = Color3.fromRGB(255,200,255)
+    })
+end)
+
+
+createButtonRow(visualsPage, "High Saturation+", function()
+    Clean()
+    FX("ColorCorrectionEffect", {
+        Saturation = 3
+    })
+end)
+end -- конец do-блока "Visuals"
+
+
+-- ==================== Вкладка ME ====================
+local mePage = registerTab(topTabsHolder, "ME", 1)
+
+local slideBoostToggle = false
+
+local slideBoostConnection
+local slideJumpConnection
+
+local function toggleSlideBoost(state)
+
+    slideBoostToggle = state
+
+    local plr = game.Players.LocalPlayer
+    local char = plr.Character or plr.CharacterAdded:Wait()
+    local hum = char:WaitForChild("Humanoid")
+    local hrp = char:WaitForChild("HumanoidRootPart")
+
+    if state then
+
+        local baseSpeed = 16
+        local jumpBoost = 5
+        local speedCap = 100
+        local decelRate = 50
+        local lowFriction = 0.01
+        local currSpeed = baseSpeed
+
+        local origProps = hrp.CustomPhysicalProperties or PhysicalProperties.new(0.7,0.3,0.5,1,1)
+
+        local slipProps = PhysicalProperties.new(
+            origProps.Density,
+            lowFriction,
+            origProps.Elasticity,
+            100,
+            origProps.ElasticityWeight
+        )
+
+        local lastDir = Vector3.new(0,0,0)
+
+        slideJumpConnection = hum.Jumping:Connect(function()
+            currSpeed = math.min(currSpeed + jumpBoost, speedCap)
+            hum.WalkSpeed = currSpeed
+        end)
+
+        slideBoostConnection = game:GetService("RunService").Heartbeat:Connect(function(delta)
+
+            if hum.MoveDirection.Magnitude > 0 then
+                lastDir = hum.MoveDirection.Unit
+            end
+
+            if hum.MoveDirection.Magnitude == 0 and currSpeed > baseSpeed then
+
+                hrp.CustomPhysicalProperties = slipProps
+
+                currSpeed = math.max(baseSpeed, currSpeed - decelRate * delta)
+
+                hrp.Velocity = Vector3.new(
+                    lastDir.X * currSpeed,
+                    hrp.Velocity.Y,
+                    lastDir.Z * currSpeed
+                )
+            end
+        end)
+
+    else
+
+        if slideBoostConnection then
+            slideBoostConnection:Disconnect()
+            slideBoostConnection = nil
+        end
+
+        if slideJumpConnection then
+            slideJumpConnection:Disconnect()
+            slideJumpConnection = nil
+        end
+
+        hum.WalkSpeed = 16
+        hrp.CustomPhysicalProperties = nil
+
+    end
+end
+
+
+local player = Players.LocalPlayer
+
+local setSpeedSlider = createSliderRow(mePage, "Скорость (WalkSpeed)", 16, 9999, 16, function(value)
+    local character = player.Character or player.CharacterAdded:Wait()
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+
+    if humanoid then
+        humanoid.WalkSpeed = value
+    end
+end)
+
+local function resetSpeed()
+    -- обновляет и сам WalkSpeed, и положение ползунка в меню
+    setSpeedSlider(16)
+end
+
+createButtonRow(mePage, "Сбросить скорость", resetSpeed)
+
+createManualInputRow(mePage, "Своя скорость", 16, 9999, setSpeedSlider)
+
+
+local setJumpSlider = createSliderRow(mePage, "Прыжок (JumpPower)", 22, 9999, 50, function(value)
+    local character = player.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if humanoid then
+        humanoid.UseJumpPower = true
+        humanoid.JumpPower = value
+    end
+end)
+
+createManualInputRow(mePage, "Свой прыжок", 50, 9999, setJumpSlider)
+
+local setFOVSlider = createSliderRow(mePage, "Поле зрения (FOV)", 30, 120, 70, function(value)
+    workspace.CurrentCamera.FieldOfView = value
+end)
+
+local setFreecamSpeedSlider = createSliderRow(mePage, "Скорость Freecam", 5, 200, 30, function(value)
+	freecamSpeed = value
+end)
+
+local toggleFreecamRow, setFreecamState = createToggleRow(mePage, "Свободная камера", function(state)
+	toggleFreecam(state)
+end, "Freecam")
+
+local setFlySpeedSlider = createSliderRow(mePage, "Скорость полёта", 5, 200, 50, function(value)
+    flySpeed = value
+end)
+
+local toggleFlyRow, setFlyState = createToggleRow(mePage, "Полёт", function(state)
+    toggleFly(state)
+end, "Полёт")
+
+createButtonRow(mePage, "Сбросить персонажа", function()
+    local character = player.Character
+    if character and character:FindFirstChildOfClass("Humanoid") then
+        character:FindFirstChildOfClass("Humanoid").Health = 0
+    end
+end)
+
+local toggleGodmodeRow, setGodmodeState = createToggleRow(mePage, "Неуязвимость", function(state)
+    setGodmode(state)
+end, "Неуязвимость")
+
+local toggleInvisibleRow, setInvisibleState = createToggleRow(mePage, "Невидимость", function(state)
+    setInvisible(state)
+end, "Невидимость")
+
+local toggleNoclipRow, setNoclipState = createToggleRow(mePage, "Ноуклип", function(state)
+    setNoclip(state)
+end, "Ноуклип")
+
+-- ==================== Вкладка Player ====================
+local playerPage = registerTab(topTabsHolder, "Player", 2)
+
+local playerListLabel = Instance.new("TextLabel")
+playerListLabel.Size = UDim2.new(1, 0, 0, 20)
+playerListLabel.BackgroundTransparency = 1
+playerListLabel.Text = "Игроки онлайн:"
+playerListLabel.TextColor3 = Color3.fromRGB(230, 230, 230)
+playerListLabel.Font = Enum.Font.Gotham
+playerListLabel.TextSize = 13
+playerListLabel.TextXAlignment = Enum.TextXAlignment.Left
+playerListLabel.LayoutOrder = nextLayoutOrder(playerPage)
+playerListLabel.Parent = playerPage
+
+local spectating = false
+
+local function stopSpectate()
+    spectating = false
+    local camera = workspace.CurrentCamera
+    camera.CameraType = Enum.CameraType.Custom
+    if player.Character and player.Character:FindFirstChildOfClass("Humanoid") then
+        camera.CameraSubject = player.Character:FindFirstChildOfClass("Humanoid")
+    end
+end
+
+local function spectatePlayer(targetPlr)
+    local character = targetPlr.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return end
+
+    spectating = true
+    local camera = workspace.CurrentCamera
+    camera.CameraType = Enum.CameraType.Custom
+    camera.CameraSubject = humanoid
+end
+
+local returnCamBtn = Instance.new("TextButton")
+returnCamBtn.Size = UDim2.new(1, 0, 0, 28)
+returnCamBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+returnCamBtn.Text = "Вернуть свою камеру"
+returnCamBtn.TextColor3 = Color3.fromRGB(230, 230, 230)
+returnCamBtn.Font = Enum.Font.GothamBold
+returnCamBtn.TextSize = 13
+returnCamBtn.LayoutOrder = nextLayoutOrder(playerPage)
+returnCamBtn.Parent = playerPage
+Instance.new("UICorner", returnCamBtn).CornerRadius = UDim.new(0, 6)
+returnCamBtn.MouseButton1Click:Connect(stopSpectate)
+
+local function refreshPlayerList()
+    for _, child in ipairs(playerPage:GetChildren()) do
+        if child.Name == "PlayerRow" then
+            child:Destroy()
+        end
+    end
+
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= player then
+            local row = createRow(playerPage, plr.Name)
+            row.Name = "PlayerRow"
+
+            local watchBtn = Instance.new("TextButton")
+            watchBtn.Size = UDim2.new(0, 80, 0, 22)
+            watchBtn.Position = UDim2.new(1, -90, 0.5, -11)
+            watchBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+            watchBtn.Text = "Смотреть"
+            watchBtn.TextColor3 = Color3.fromRGB(230, 230, 230)
+            watchBtn.Font = Enum.Font.GothamBold
+            watchBtn.TextSize = 12
+            watchBtn.Parent = row
+            Instance.new("UICorner", watchBtn).CornerRadius = UDim.new(0, 5)
+            local tpBtn = Instance.new("TextButton")
+tpBtn.Size = UDim2.new(0, 50, 0, 22)
+tpBtn.Position = UDim2.new(1, -145, 0.5, -11)
+tpBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+tpBtn.Text = "ТП"
+tpBtn.TextColor3 = Color3.fromRGB(230, 230, 230)
+tpBtn.Font = Enum.Font.GothamBold
+tpBtn.TextSize = 12
+tpBtn.Parent = row
+Instance.new("UICorner", tpBtn).CornerRadius = UDim.new(0, 5)
+
+tpBtn.MouseButton1Click:Connect(function()
+    local myCharacter = player.Character
+    local targetCharacter = plr.Character
+
+    if not myCharacter or not targetCharacter then return end
+
+    local myHRP = myCharacter:FindFirstChild("HumanoidRootPart")
+    local targetHRP = targetCharacter:FindFirstChild("HumanoidRootPart")
+
+    if myHRP and targetHRP then
+        myHRP.CFrame = targetHRP.CFrame * CFrame.new(0, 0, -3)
+    end
+end)
+            watchBtn.MouseButton1Click:Connect(function()
+                spectatePlayer(plr)
+            end)
+        end
+    end
+end
+
+refreshPlayerList()
+table.insert(connections, Players.PlayerAdded:Connect(refreshPlayerList))
+table.insert(connections, Players.PlayerRemoving:Connect(function(plr)
+    refreshPlayerList()
+end))
+
+-- если персонаж заспавнился заново, а мы спектейтили себя - восстановим субъект
+table.insert(connections, player.CharacterAdded:Connect(function(character)
+    if not spectating then
+        task.wait(0.3)
+        local humanoid = character:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            workspace.CurrentCamera.CameraSubject = humanoid
+        end
+    end
+end))
+
+
+-- ==================== Вкладка World ====================
+local worldPage = registerTab(topTabsHolder, "World", 3)
+
+local timePoints = {
+    { value = 0,  label = "Ночь" },
+    { value = 6,  label = "Утро" },
+    { value = 12, label = "День" },
+    { value = 18, label = "Вечер" },
+    { value = 24, label = "Ночь" },
+}
+
+createSnapSliderRow(worldPage, "Время суток", timePoints, 3, function(value, label)
+    game:GetService("Lighting").ClockTime = value
+end)
+
+-- ==================== ESP (подсветка игроков) ====================
+local espEnabled = false
+local espObjects = {} -- [player] = { highlight = ..., billboard = ... }
+
+local function removeESPFor(plr)
+    local data = espObjects[plr]
+    if data then
+        if data.highlight then data.highlight:Destroy() end
+        if data.billboard then data.billboard:Destroy() end
+        espObjects[plr] = nil
+    end
+end
+
+local espTeamColor = Color3.fromRGB(60, 200, 90)  -- цвет для своей команды
+local espEnemyColor = Color3.fromRGB(255, 60, 60) -- цвет для чужой команды
+local espEnemyColor2 = Color3.fromRGB(255, 220, 60) -- цвет для чужой команды 2
+local espEnemyColor3 = Color3.fromRGB(180, 80, 255)-- цвет для чужой команды 3
+local espEnemyColor4 = Color3.fromRGB(60, 140, 255)-- цвет для чужой команды 4
+local espEnemyColor5 = Color3.fromRGB(60, 230, 230)-- цвет для чужой команды 5
+
+local enemyTeamMap = {}
+
+local function rebuildEnemyTeamMap()
+    table.clear(enemyTeamMap)
+
+    local index = 1
+    local myTeam = player.Team
+
+    local teams = game:GetService("Teams"):GetChildren()
+    table.sort(teams, function(a, b)
+        return a.Name < b.Name
+    end)
+
+    for _, team in ipairs(teams) do
+        if team ~= myTeam then
+            enemyTeamMap[team] = index
+            index += 1
+        end
+    end
+end
+
+local function getESPColorFor(plr)
+    local myTeam = player.Team
+
+    if plr.Team == myTeam then
+        return espTeamColor
+    end
+
+    if next(enemyTeamMap) == nil then
+        rebuildEnemyTeamMap()
+    end
+
+    local id = enemyTeamMap[plr.Team] or 1
+
+    if id == 1 then
+        return espEnemyColor
+    elseif id == 2 then
+        return espEnemyColor2
+    elseif id == 3 then
+        return espEnemyColor3
+    elseif id == 4 then
+        return espEnemyColor4
+    elseif id == 5 then
+        return espEnemyColor5
+    else
+        return espEnemyColor
+    end
+end
+
+local function addESPFor(plr)
+    if plr == player then return end
+    local character = plr.Character
+    if not character then return end
+
+    removeESPFor(plr) -- на случай повторного вызова
+
+    local highlightColor = getESPColorFor(plr)
+
+    local highlight = Instance.new("Highlight")
+    highlight.Name = "ESP_Highlight"
+    highlight.FillColor = highlightColor
+    highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
+    highlight.FillTransparency = 0.6
+    highlight.OutlineTransparency = 0
+    highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    highlight.Parent = character
+
+    local head = character:FindFirstChild("Head")
+    local billboard
+    if head then
+        billboard = Instance.new("BillboardGui")
+        billboard.Name = "ESP_Billboard"
+        billboard.Size = UDim2.new(0, 160, 0, 36)
+        billboard.StudsOffset = Vector3.new(0, 1.5, 0)
+        billboard.AlwaysOnTop = true
+        billboard.Parent = head
+
+        local nameLabel = Instance.new("TextLabel")
+        nameLabel.Size = UDim2.new(1, 0, 1, 0)
+        nameLabel.BackgroundTransparency = 1
+        nameLabel.Text = plr.Name
+        nameLabel.TextColor3 = highlightColor
+        nameLabel.TextStrokeTransparency = 0
+        nameLabel.Font = Enum.Font.GothamBold
+        nameLabel.TextSize = 14
+        nameLabel.Parent = billboard
+    end
+
+    espObjects[plr] = { highlight = highlight, billboard = billboard }
+end
+
+local function refreshESP()
+    for _, plr in ipairs(Players:GetPlayers()) do
+        addESPFor(plr)
+    end
+end
+
+local function clearESP()
+    for plr, _ in pairs(espObjects) do
+        removeESPFor(plr)
+    end
+end
+
+local function setESP(state)
+    espEnabled = state
+    if espEnabled then
+        refreshESP()
+    else
+        clearESP()
+    end
+end
+
+-- отслеживаем респавн персонажей, чтобы ESP не пропадал
+table.insert(connections, Players.PlayerAdded:Connect(function(plr)
+    table.insert(connections, plr.CharacterAdded:Connect(function()
+        if espEnabled then
+            task.wait(0.2) -- дать частям тела прогрузиться
+            addESPFor(plr)
+        end
+    end))
+end))
+
+for _, plr in ipairs(Players:GetPlayers()) do
+    table.insert(connections, plr.CharacterAdded:Connect(function()
+        if espEnabled then
+            task.wait(0.2)
+            addESPFor(plr)
+        end
+    end))
+end
+
+table.insert(connections, Players.PlayerRemoving:Connect(function(plr)
+    removeESPFor(plr)
+end))
+
+-- ---------- Обновление цвета ESP при смене команды ----------
+-- Раньше цвет считался один раз при создании ESP и не обновлялся,
+-- поэтому после смены команды (своей или чужой) подсветка могла
+-- "залипать" в цвете союзника. Теперь пересчитываем при любой смене Team.
+local function watchTeamChanges(plr)
+    table.insert(connections, plr:GetPropertyChangedSignal("Team"):Connect(function()
+        if espEnabled and plr.Character then
+            addESPFor(plr)
+        end
+    end))
+end
+
+for _, plr in ipairs(Players:GetPlayers()) do
+    watchTeamChanges(plr)
+end
+
+table.insert(connections, Players.PlayerAdded:Connect(watchTeamChanges))
+
+-- если сменилась команда самого локального игрока — пересчитать всех
+table.insert(connections, player:GetPropertyChangedSignal("Team"):Connect(function()
+    rebuildEnemyTeamMap()
+
+    if espEnabled then
+        refreshESP()
+    end
+end))
+
+local espMaxDistance = 0 -- 0 = без ограничения
+local espShowNames = true
+
+local function updateESPVisibility()
+    for plr, data in pairs(espObjects) do
+        local character = plr.Character
+        local hrp = character and character:FindFirstChild("HumanoidRootPart")
+        local myHrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+
+        local visible = true
+        if espMaxDistance > 0 and hrp and myHrp then
+            local dist = (hrp.Position - myHrp.Position).Magnitude
+            visible = dist <= espMaxDistance
+        end
+
+        if data.highlight then
+            data.highlight.Enabled = visible
+        end
+        if data.billboard then
+            data.billboard.Enabled = visible and espShowNames
+        end
+    end
+end
+
+local espUpdateConn = RunService.Heartbeat:Connect(function()
+    if espEnabled then
+        updateESPVisibility()
+    end
+end)
+table.insert(connections, espUpdateConn)
+
+local toggleESPRow, setESPState = createToggleRow(worldPage, "ESP (подсветка игроков)", function(state)
+    setESP(state)
+end, "ESP")
+
+-- ==================== Вкладка Разное ====================
+-- Обёрнуто в do...end: все переменные внутри этого блока (и блока "Танцы"
+-- ниже) нужны только здесь и нигде за пределами блока не используются.
+-- Это освобождает регистры Luau сразу после блока, а не держит их занятыми
+-- до конца скрипта (иначе компилятор упирается в лимит "Out of local
+-- registers" - максимум 200 локальных переменных в одной области видимости).
+do
+local miscPage = registerTab(topTabsHolder, "Разное", 5)
+
+-- ---------- Безлимитные прыжки ----------
+-- По умолчанию Humanoid не даёт прыгать в воздухе, потому что не находится
+-- в состоянии Landed/Running. Мы принудительно переводим его в состояние
+-- Jumping при каждом запросе прыжка, независимо от того, стоит ли он на земле.
+-- JumpRequest, а не InputBegan+KeyCode.Space - это событие срабатывает
+-- одинаково от клавиши Space (ПК), кнопки прыжка на телефоне и геймпада.
+local infiniteJumpEnabled = false
+
+local infiniteJumpConn = UserInputService.JumpRequest:Connect(function()
+    if not infiniteJumpEnabled then return end
+    local character = player.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if humanoid then
+        humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+    end
+end)
+table.insert(connections, infiniteJumpConn)
+
+createToggleRow(miscPage, "Безлимитные прыжки", function(state)
+    infiniteJumpEnabled = state
+end, "Infinite Jump")
+
+-- ---------- Slide Boost (перенесено сюда из ME) ----------
+_, setSlideBoostState = createToggleRow(miscPage, "Slide Boost", function(state)
+    toggleSlideBoost(state)
+end)
+
+end -- конец do-блока "Разное" (регистры освобождаются здесь, ДО начала "Танцы")
+
+-- ==================== Вкладка Танцы ====================
+-- Отдельный do-блок, а не продолжение предыдущего: если бы оба раздела
+-- были в одном do...end, регистры "Разное" не освобождались бы до конца
+-- ВСЕГО блока - то есть уже во время компиляции "Танцы" (например, на
+-- playEmote) счётчик всё ещё включал бы все переменные "Разное" и
+-- переполнялся бы. Раздельные блоки освобождают регистры между разделами.
+do
+local dancePage = registerTab(topTabsHolder, "Танцы", 6)
+
+-- ---------- Готовые эмоуты (реальные публичные ID с маркетплейса Roblox) ----------
+-- Проигрываются через Humanoid/Animator - как обычные эмоуты, поэтому
+-- видны всем остальным игрокам, а не только тебе.
+local presetEmotes = {
+    { name = "👋 Wave", id = "rbxassetid://507770239" },
+    { name = "💃 Dance 1", id = "rbxassetid://507771019" },
+    { name = "🕺 Dance 2", id = "rbxassetid://507776043" },
+    { name = "🎉 Dance 3", id = "rbxassetid://507777268" },
+    { name = "😂 Laugh", id = "rbxassetid://507770818" },
+    { name = "👉 Point", id = "rbxassetid://507770453" },
+    { name = "🙌 Cheer", id = "rbxassetid://507770677" },
+    { name = "🪙 Подбросить монету", id = "rbxassetid://119561592749552" },
+}
+
+local currentEmoteTrack
+
+local function playEmote(animationId)
+    local character = player.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return end
+
+    local animator = humanoid:FindFirstChildOfClass("Animator")
+    if not animator then
+        animator = Instance.new("Animator")
+        animator.Parent = humanoid
+    end
+
+    if currentEmoteTrack then
+        currentEmoteTrack:Stop()
+        currentEmoteTrack = nil
+    end
+
+    local animation = Instance.new("Animation")
+    animation.AnimationId = animationId
+
+    local ok, track = pcall(function()
+        return animator:LoadAnimation(animation)
+    end)
+
+    if ok and track then
+        currentEmoteTrack = track
+        track:Play()
+    else
+        -- Платные каталожные анимации (как эта монетка) часто требуют,
+        -- чтобы аккаунт ими владел (купил) - иначе Roblox тихо отказывает
+        -- в загрузке. Если это твой случай - купи предмет один раз, и он
+        -- заработает. Сообщение в консоли покажет причину.
+        warn(("Не удалось проиграть анимацию %s (%s)"):format(
+            animationId, tostring(track)
+        ))
+    end
+end
+
+for _, emote in ipairs(presetEmotes) do
+    createButtonRow(dancePage, emote.name, function()
+        playEmote(emote.id)
+    end)
+end
+
+createButtonRow(dancePage, "⏹ Остановить анимацию", function()
+    if currentEmoteTrack then
+        currentEmoteTrack:Stop()
+        currentEmoteTrack = nil
+    end
+end)
+
+-- ---------- Переопределение анимаций ходьбы/бега/прыжка/падения/плавания/лазания ----------
+-- Раскрывающийся список готовых наборов анимаций (реальные ID из
+-- официальной документации Roblox по бандлам аватаров), а не поле для
+-- ввода своего ID. Клик по названию категории показывает/скрывает список
+-- пресетов прямо под кнопкой - остальные строки сами сдвигаются вниз,
+-- т.к. UIListLayout не резервирует место под невидимые элементы.
+local animateSlots = {
+    { label = "Ходьба свой",  key = "walk",  path = { "walk", "WalkAnim" } },
+    { label = "Бег свой",     key = "run",   path = { "run", "RunAnim" } },
+    { label = "Прыжок свой",  key = "jump",  path = { "jump", "JumpAnim" } },
+    { label = "Падение свой", key = "fall",  path = { "fall", "FallAnim" } },
+    { label = "Плавание свой",key = "swim",  path = { "swim", "Swim" } },
+    { label = "Лазанье свой", key = "climb", path = { "climb", "ClimbAnim" } },
+	{ label = "Бездействие свой", key = "idle", path = { "idle", "Animation1" } },
+}
+
+-- Готовые наборы (бандлы) анимаций - реальные ID из документации Roblox
+-- (create.roblox.com/docs, бандлы аватаров). Каждый бандл даёт цельный,
+-- согласованный набор анимаций под все состояния движения.
+local animationBundles = {
+    {
+        name = "Классика",
+        walk = "rbxassetid://891636393", run = "rbxassetid://891636393", idle = "rbxassetid://507766388",
+        jump = "rbxassetid://891627522", fall = "rbxassetid://891617961",
+        swim = "rbxassetid://891639666", climb = "rbxassetid://891609353", 
+    },
+    {
+        name = "Ninja",
+        walk = "rbxassetid://656121766", run = "rbxassetid://656118852", idle = "rbxassetid://616158929",
+        jump = "rbxassetid://656117878", fall = "rbxassetid://656115606",
+        swim = "rbxassetid://656119721", climb = "rbxassetid://656114359",
+    },
+    {
+        name = "Bubbly",
+        walk = "rbxassetid://910034870", run = "rbxassetid://910025107", idle = "rbxassetid://910030921",
+        jump = "rbxassetid://910016857", fall = "rbxassetid://910001910",
+        swim = "rbxassetid://910028158", climb = "rbxassetid://909997997",
+    },
+    {
+        name = "Cartoony",
+        walk = "rbxassetid://742640026", run = "rbxassetid://742638842",  idle = "rbxassetid://742639812",
+        jump = "rbxassetid://742637942", fall = "rbxassetid://742637151",
+        swim = "rbxassetid://742639220", climb = "rbxassetid://742636889",
+    },
+    {
+        name = "Elder",
+        walk = "rbxassetid://845403856", run = "rbxassetid://845386501",  idle = "rbxassetid://845403127",
+        jump = "rbxassetid://845398858", fall = "rbxassetid://845396048",
+        swim = "rbxassetid://845401742", climb = "rbxassetid://845392038",
+    },
+    {
+        name = "Knight",
+        walk = "rbxassetid://657552124", run = "rbxassetid://657564596",  idle = "rbxassetid://657557095",
+        jump = "rbxassetid://658409194", fall = "rbxassetid://657600338",
+        swim = "rbxassetid://657560551", climb = "rbxassetid://658360781",
+    },
+    {
+        name = "Levitation",
+        walk = "rbxassetid://616013216", run = "rbxassetid://616010382",  idle = "rbxassetid://616012453",
+        jump = "rbxassetid://616008936", fall = "rbxassetid://616005863",
+        swim = "rbxassetid://616011509", climb = "rbxassetid://616003713",
+    },
+    {
+        name = "Mage",
+        walk = "rbxassetid://707897309", run = "rbxassetid://707861613",  idle = "rbxassetid://707894699",
+        jump = "rbxassetid://707853694", fall = "rbxassetid://707829716",
+        swim = "rbxassetid://707876443", climb = "rbxassetid://707826056",
+    },
+    {
+        name = "Astronaut",
+        walk = "rbxassetid://891636393", run = "rbxassetid://891636393",  idle = "rbxassetid://891663592",
+        jump = "rbxassetid://891627522", fall = "rbxassetid://891617961",
+        swim = "rbxassetid://891639666", climb = "rbxassetid://891609353",
+    },
+    {
+        name = "Pirate",
+        walk = "rbxassetid://750785693", run = "rbxassetid://750783738",  idle = "rbxassetid://750785176",
+        jump = "rbxassetid://750782230", fall = "rbxassetid://750780242",
+        swim = "rbxassetid://750784579", climb = "rbxassetid://750779899",
+    },
+    {
+        name = "Robot",
+        walk = "rbxassetid://616095330", run = "rbxassetid://616091570",  idle = "rbxassetid://616094091",
+        jump = "rbxassetid://616090535", fall = "rbxassetid://616087089",
+        swim = "rbxassetid://616092998", climb = "rbxassetid://616086039",
+    },
+    {
+        name = "Rthro",
+        walk = "rbxassetid://2510202577", run = "rbxassetid://2510198475",  idle = "rbxassetid://2510201162",
+        jump = "rbxassetid://2510197830", fall = "rbxassetid://2510195892",
+        swim = "rbxassetid://2510199791", climb = "rbxassetid://2510192778",
+    },
+    {
+        name = "Stylish",
+        walk = "rbxassetid://616146177", run = "rbxassetid://616140816",  idle = "rbxassetid://616144772",
+        jump = "rbxassetid://616139451", fall = "rbxassetid://616134815",
+        swim = "rbxassetid://616143378", climb = "rbxassetid://616133594",
+    },
+    {
+        name = "Superhero",
+        walk = "rbxassetid://616122287", run = "rbxassetid://616117076",  idle = "rbxassetid://616120861",
+        jump = "rbxassetid://616115533", fall = "rbxassetid://616108001",
+        swim = "rbxassetid://616119360", climb = "rbxassetid://616104706",
+    },
+    {
+        name = "Toy",
+        walk = "rbxassetid://782843345", run = "rbxassetid://782842708",  idle = "rbxassetid://782845186",
+        jump = "rbxassetid://782847020", fall = "rbxassetid://782846423",
+        swim = "rbxassetid://782844582", climb = "rbxassetid://782843869",
+    },
+    {
+        name = "Vampire",
+        walk = "rbxassetid://1083473930", run = "rbxassetid://1083462077",  idle = "rbxassetid://1083467779",
+        jump = "rbxassetid://1083455352", fall = "rbxassetid://1083443587",
+        swim = "rbxassetid://1083464683", climb = "rbxassetid://1083439238",
+    },
+    {
+        name = "Werewolf",
+        walk = "rbxassetid://1083178339", run = "rbxassetid://1083216690",  idle = "rbxassetid://1083225406",
+        jump = "rbxassetid://1083218792", fall = "rbxassetid://1083189019",
+        swim = "rbxassetid://1083222527", climb = "rbxassetid://1083182000",
+    },
+    {
+        name = "Zombie",
+        walk = "rbxassetid://616168032", run = "rbxassetid://616163682",  idle = "rbxassetid://616166655",
+        jump = "rbxassetid://616161997", fall = "rbxassetid://616157476",
+        swim = "rbxassetid://616165109", climb = "rbxassetid://616156119",
+    },
+    {
+        name = "Спорт",
+        walk = "rbxassetid://910034870", run = "rbxassetid://910025107",  idle = "rbxassetid://10921259953",
+        jump = "rbxassetid://910016857", fall = "rbxassetid://910001910",
+        swim = "rbxassetid://910028158", climb = "rbxassetid://909997997",
+    },
+}
+
+local function applyMovementAnimation(path, animationId)
+    local character = player.Character
+    local animateScript = character and character:FindFirstChild("Animate")
+    if not animateScript then return end
+
+    local folder = animateScript:FindFirstChild(path[1])
+    if not folder then return end
+
+    -- Для idle меняем обе анимации
+    if path[1] == "idle" then
+        local anim1 = folder:FindFirstChild("Animation1")
+        local anim2 = folder:FindFirstChild("Animation2")
+
+        if anim1 then
+            anim1.AnimationId = animationId
+        end
+
+        if anim2 then
+            anim2.AnimationId = animationId
+        end
+
+        return
+    end
+
+    local animValue = folder:FindFirstChild(path[2])
+    if animValue then
+        animValue.AnimationId = animationId
+    end
+end
+
+
+for _, slot in ipairs(animateSlots) do
+    local headerRow = createRow(dancePage, slot.label, 32)
+
+    local expandBtn = Instance.new("TextButton")
+    expandBtn.Size = UDim2.new(0, 80, 0, 22)
+    expandBtn.Position = UDim2.new(1, -90, 0.5, -11)
+    expandBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+    expandBtn.Text = "Список ▾"
+    expandBtn.TextColor3 = Color3.fromRGB(230, 230, 230)
+    expandBtn.Font = Enum.Font.GothamBold
+    expandBtn.TextSize = 12
+    expandBtn.Parent = headerRow
+    Instance.new("UICorner", expandBtn).CornerRadius = UDim.new(0, 5)
+
+    -- Контейнер с пресетами идёт следующей строкой сразу под заголовком -
+    -- пока Visible = false, UIListLayout не выделяет под него место,
+    -- поэтому остальные строки ниже "поджаты" к заголовку.
+    local optionsList = Instance.new("Frame")
+    optionsList.Size = UDim2.new(1, 0, 0, #animationBundles * 34)
+    optionsList.BackgroundTransparency = 1
+    optionsList.Visible = false
+    optionsList.LayoutOrder = nextLayoutOrder(dancePage)
+    optionsList.Parent = dancePage
+
+    local optionsLayout = Instance.new("UIListLayout")
+    optionsLayout.Padding = UDim.new(0, 4)
+    optionsLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    optionsLayout.Parent = optionsList
+
+    for _, bundle in ipairs(animationBundles) do
+        local optionBtn = Instance.new("TextButton")
+        optionBtn.Size = UDim2.new(1, -20, 0, 30)
+        optionBtn.Position = UDim2.new(0, 20, 0, 0)
+        optionBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 58)
+        optionBtn.Text = "• " .. bundle.name
+        optionBtn.TextColor3 = Color3.fromRGB(220, 220, 230)
+        optionBtn.Font = Enum.Font.Gotham
+        optionBtn.TextSize = 13
+        optionBtn.TextXAlignment = Enum.TextXAlignment.Left
+        optionBtn.Parent = optionsList
+        Instance.new("UICorner", optionBtn).CornerRadius = UDim.new(0, 5)
+
+        local animId = bundle[slot.key]
+        optionBtn.MouseButton1Click:Connect(function()
+        applyMovementAnimation(slot.path, animId)
+        end)
+    end
+
+    expandBtn.MouseButton1Click:Connect(function()
+        optionsList.Visible = not optionsList.Visible
+        expandBtn.Text = optionsList.Visible and "Список ▴" or "Список ▾"
+    end)
+end
+
+
+-- ---------- Ctrl + ЛКМ: телепорт в точку под курсором (вкладка ME) ----------
+-- Раньше проверка "if gameProcessed then return end" могла блокировать
+-- срабатывание из-за собственного меню/CoreGui. Теперь вместо этого
+-- игнорируем клик только если реально набираешь текст в поле ввода -
+-- это точнее отражает намерение "не мешать текстовым полям".
+local clickTeleportEnabled = false
+
+local clickTeleportConn = UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if not clickTeleportEnabled then return end
+    if UserInputService:GetFocusedTextBox() then return end
+    if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+    if not (UserInputService:IsKeyDown(Enum.KeyCode.LeftControl)
+        or UserInputService:IsKeyDown(Enum.KeyCode.RightControl)) then return end
+
+    local character = player.Character
+    local hrp = character and character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+
+    local camera = workspace.CurrentCamera
+    local mousePos = UserInputService:GetMouseLocation()
+    local unitRay = camera:ScreenPointToRay(mousePos.X, mousePos.Y)
+
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantInstances = { character }
+
+    local result = workspace:Raycast(unitRay.Origin, unitRay.Direction * 1000, params)
+    if result then
+        hrp.CFrame = CFrame.new(result.Position + Vector3.new(0, 3, 0))
+    end
+end)
+table.insert(connections, clickTeleportConn)
+
+createToggleRow(mePage, "Ctrl+ЛКМ: телепорт по курсору", function(state)
+    clickTeleportEnabled = state
+end, "Click Teleport")
+end -- конец do-блока "Танцы"
+
+-- ==================== Вкладка Сохранения ====================
+local savesPage = registerTab(topTabsHolder, "Сохранения", 4)
+
+local HttpService = game:GetService("HttpService")
+local saveFileName = "AdminMenuSaves_" .. tostring(game.PlaceId) .. ".json"
+
+local savedList = {} -- { {name=..., x=..., y=..., z=..., row=Instance}, ... }
+
+local function persistSaves()
+    pcall(function()
+        local plain = {}
+        for _, entry in ipairs(savedList) do
+            table.insert(plain, { name = entry.name, x = entry.x, y = entry.y, z = entry.z })
+        end
+        local json = HttpService:JSONEncode(plain)
+        writefile(saveFileName, json)
+    end)
+end
+
+local function loadSaves()
+    local ok, data = pcall(function()
+        if isfile and isfile(saveFileName) then
+            local json = readfile(saveFileName)
+            return HttpService:JSONDecode(json)
+        end
+        return nil
+    end)
+    if ok and data then
+        return data
+    end
+    return {}
+end
+
+local function createSaveRow(entry)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, 0, 0, 54)
+    row.BackgroundColor3 = Color3.fromRGB(45, 45, 50)
+    row.LayoutOrder = nextLayoutOrder(savesPage)
+    row.Parent = savesPage
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 6)
+
+    local nameBox = Instance.new("TextBox")
+    nameBox.Size = UDim2.new(1, -90, 0, 22)
+    nameBox.Position = UDim2.new(0, 8, 0, 4)
+    nameBox.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+    nameBox.Text = entry.name
+    nameBox.TextColor3 = Color3.fromRGB(230, 230, 230)
+    nameBox.Font = Enum.Font.GothamBold
+    nameBox.TextSize = 13
+    nameBox.ClearTextOnFocus = false
+    nameBox.TextXAlignment = Enum.TextXAlignment.Left
+    nameBox.Parent = row
+    Instance.new("UICorner", nameBox).CornerRadius = UDim.new(0, 5)
+
+    nameBox.FocusLost:Connect(function()
+        entry.name = nameBox.Text
+        persistSaves()
+    end)
+
+    local coordsText = Instance.new("TextLabel")
+    coordsText.Size = UDim2.new(1, -16, 0, 18)
+    coordsText.Position = UDim2.new(0, 8, 0, 28)
+    coordsText.BackgroundTransparency = 1
+    coordsText.Text = string.format("X: %d Y: %d Z: %d", entry.x, entry.y, entry.z)
+    coordsText.TextColor3 = Color3.fromRGB(160, 160, 175)
+    coordsText.Font = Enum.Font.Gotham
+    coordsText.TextSize = 12
+    coordsText.TextXAlignment = Enum.TextXAlignment.Left
+    coordsText.Parent = row
+
+    local tpButton = Instance.new("TextButton")
+    tpButton.Size = UDim2.new(0, 36, 0, 22)
+    tpButton.Position = UDim2.new(1, -80, 0, 4)
+    tpButton.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+    tpButton.Text = "TP"
+    tpButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    tpButton.Font = Enum.Font.GothamBold
+    tpButton.TextSize = 12
+    tpButton.Parent = row
+    Instance.new("UICorner", tpButton).CornerRadius = UDim.new(0, 5)
+
+    local delButton = Instance.new("TextButton")
+    delButton.Size = UDim2.new(0, 36, 0, 22)
+    delButton.Position = UDim2.new(1, -40, 0, 4)
+    delButton.BackgroundColor3 = Color3.fromRGB(120, 40, 40)
+    delButton.Text = "X"
+    delButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    delButton.Font = Enum.Font.GothamBold
+    delButton.TextSize = 12
+    delButton.Parent = row
+    Instance.new("UICorner", delButton).CornerRadius = UDim.new(0, 5)
+
+    tpButton.MouseButton1Click:Connect(function()
+        local character = player.Character
+        local hrp = character and character:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            hrp.CFrame = CFrame.new(entry.x, entry.y, entry.z)
+        end
+    end)
+
+    delButton.MouseButton1Click:Connect(function()
+        for i, e in ipairs(savedList) do
+            if e == entry then
+                table.remove(savedList, i)
+                break
+            end
+        end
+        row:Destroy()
+        persistSaves()
+    end)
+
+    entry.row = row
+    return row
+end
+
+local savedCount = 0
+
+local customRow = createRow(savesPage, "Свои координаты", 45)
+
+local xBox = Instance.new("TextBox")
+xBox.Size = UDim2.new(0, 70, 0, 24)
+xBox.Position = UDim2.new(0, 8, 0, 36)
+xBox.PlaceholderText = "X"
+xBox.Text = ""
+xBox.Parent = customRow
+
+local yBox = xBox:Clone()
+yBox.Position = UDim2.new(0, 84, 0, 36)
+yBox.PlaceholderText = "Y"
+yBox.Parent = customRow
+
+local zBox = xBox:Clone()
+zBox.Position = UDim2.new(0, 160, 0, 36)
+zBox.PlaceholderText = "Z"
+zBox.Parent = customRow
+
+local tpBtn = Instance.new("TextButton")
+tpBtn.Size = UDim2.new(0, 60, 0, 24)
+tpBtn.Position = UDim2.new(1, -68, 0, 36)
+tpBtn.Text = "TP"
+tpBtn.BackgroundColor3 = Color3.fromRGB(60,60,70)
+tpBtn.TextColor3 = Color3.new(1,1,1)
+tpBtn.Font = Enum.Font.GothamBold
+tpBtn.TextSize = 13
+tpBtn.Parent = customRow
+Instance.new("UICorner", tpBtn).CornerRadius = UDim.new(0,5)
+
+tpBtn.MouseButton1Click:Connect(function()
+    local x = tonumber(xBox.Text)
+    local y = tonumber(yBox.Text)
+    local z = tonumber(zBox.Text)
+
+    if x and y and z then
+        local character = player.Character
+        local hrp = character and character:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            hrp.CFrame = CFrame.new(x, y, z)
+        end
+    end
+end)
+
+addSavedPosition = function(pos)
+    savedCount = savedCount + 1
+    local entry = {
+        name = "Точка " .. savedCount,
+        x = pos.X,
+        y = pos.Y,
+        z = pos.Z,
+    }
+    table.insert(savedList, entry)
+    createSaveRow(entry)
+    persistSaves()
+end
+
+-- загрузка сохранений для текущего плейса при старте
+do
+    local loaded = loadSaves()
+    for _, data in ipairs(loaded) do
+        savedCount = savedCount + 1
+        local entry = {
+            name = data.name or ("Точка " .. savedCount),
+            x = data.x,
+            y = data.y,
+            z = data.z,
+        }
+        table.insert(savedList, entry)
+        createSaveRow(entry)
+    end
+end
+
+-- ==================== Вкладка Бинды ====================
+local bindsPage = registerTab(bottomTabsHolder, "Бинды", 1)
+createRow(bindsPage, "Открыть/закрыть меню: Insert")
+
+-- ---------- Система переназначаемых биндов ----------
+local keybinds = {} -- [featureName] = Enum.KeyCode
+local bindActions = {} -- [featureName] = function() ... end
+
+-- ---------- Сохранение/загрузка биндов на диск (executor) ----------
+local bindsFileName = "AdminMenuBinds.json"
+
+local function persistBinds()
+    pcall(function()
+        local plain = {}
+        for name, key in pairs(keybinds) do
+            if key then
+                plain[name] = key.Name
+            end
+        end
+        local json = HttpService:JSONEncode(plain)
+        writefile(bindsFileName, json)
+    end)
+end
+
+local function loadBinds()
+    local ok, data = pcall(function()
+        if isfile and isfile(bindsFileName) then
+            local json = readfile(bindsFileName)
+            return HttpService:JSONDecode(json)
+        end
+        return nil
+    end)
+    if ok and data then
+        return data
+    end
+    return {}
+end
+
+local savedBinds = loadBinds()
+
+local function createBindRow(parentPage, featureName, defaultKey, onPress)
+    local row = createRow(parentPage, featureName)
+
+    -- если для этой функции есть сохранённый бинд — используем его вместо defaultKey;
+    -- пустая строка в сохранённых данных означает намеренно снятый бинд
+    local initialKey = defaultKey
+    local savedKeyName = savedBinds[featureName]
+    if savedKeyName ~= nil then
+        if savedKeyName == "" then
+            initialKey = nil
+        else
+            local ok, keyCode = pcall(function() return Enum.KeyCode[savedKeyName] end)
+            if ok and keyCode then
+                initialKey = keyCode
+            end
+        end
+    end
+
+    local bindButton = Instance.new("TextButton")
+    bindButton.Size = UDim2.new(0, 90, 0, 22)
+    bindButton.Position = UDim2.new(1, -100, 0.5, -11)
+    bindButton.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+    bindButton.Text = initialKey and initialKey.Name or "Не задано"
+    bindButton.TextColor3 = Color3.fromRGB(230, 230, 230)
+    bindButton.Font = Enum.Font.GothamBold
+    bindButton.TextSize = 13
+    bindButton.Parent = row
+    Instance.new("UICorner", bindButton).CornerRadius = UDim.new(0, 5)
+
+    keybinds[featureName] = initialKey
+    if onPress then
+        bindActions[featureName] = onPress
+    end
+
+    local listening = false
+
+    bindButton.MouseButton1Click:Connect(function()
+        listening = true
+        bindButton.Text = "..."
+        bindButton.BackgroundColor3 = Color3.fromRGB(90, 90, 210)
+    end)
+
+    local listenConn = UserInputService.InputBegan:Connect(function(input, gameProcessed)
+        if not listening then return end
+        if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+
+        listening = false
+        local key = input.KeyCode
+        keybinds[featureName] = key
+        bindButton.Text = key.Name
+        bindButton.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+        persistBinds()
+    end)
+    table.insert(connections, listenConn)
+
+    return bindButton
+end
+
+-- Бинд на каждую функцию меню
+-- Важно: бинды вызывают те же функции toggle/reset, что и кнопки в меню,
+-- поэтому состояние кнопок и списка активных функций всегда синхронно
+-- с тем, что реально включено по клавише.
+createBindRow(bindsPage, "ESP", nil, function()
+    toggleESPRow()
+end)
+
+createBindRow(bindsPage, "Slide Boost", nil, function()
+
+    slideBoostToggle = not slideBoostToggle
+    toggleSlideBoost(slideBoostToggle)
+
+end)
+
+createBindRow(bindsPage, "Сбросить персонажа", nil, function()
+    local character = player.Character
+    if character and character:FindFirstChildOfClass("Humanoid") then
+        character:FindFirstChildOfClass("Humanoid").Health = 0
+    end
+end)
+
+createBindRow(bindsPage, "Вкладка ME", nil, function()
+    selectTab("ME")
+end)
+
+createBindRow(bindsPage, "Вкладка Player", nil, function()
+    selectTab("Player")
+end)
+
+createBindRow(bindsPage, "Вкладка World", nil, function()
+    selectTab("World")
+end)
+
+createBindRow(bindsPage, "Вкладка Сохранения", nil, function()
+    selectTab("Сохранения")
+end)
+
+createBindRow(bindsPage, "Сохранить координаты", nil, function()
+    local character = player.Character
+    local hrp = character and character:FindFirstChild("HumanoidRootPart")
+    if hrp and addSavedPosition then
+        addSavedPosition(hrp.Position)
+    end
+end)
+
+createBindRow(bindsPage, "Вернуть камеру (спектейт)", nil, function()
+    stopSpectate()
+end)
+
+createBindRow(bindsPage, "Свободная камера", nil, function()
+    toggleFreecamRow()
+end)
+
+createBindRow(bindsPage, "Полёт", nil, function()
+    toggleFlyRow()
+end)
+
+createBindRow(bindsPage, "Никнеймы ESP (вкл/выкл)", nil, function()
+    toggleESPNamesRow()
+end)
+
+createBindRow(bindsPage, "Неуязвимость", nil, function()
+    toggleGodmodeRow()
+end)
+
+createBindRow(bindsPage, "Невидимость", nil, function()
+    toggleInvisibleRow()
+end)
+
+createBindRow(bindsPage, "Ноуклип", nil, function()
+    toggleNoclipRow()
+end)
+
+createBindRow(bindsPage, "Сбросить скорость", nil, function()
+    resetSpeed()
+end)
+
+local setESPDistanceSlider = createSliderRow(worldPage, "Макс. дистанция ESP (0 = без лимита)", 0, 500, 0, function(value)
+    espMaxDistance = value
+end)
+
+local toggleESPNamesRow, setESPNamesState = createToggleRow(worldPage, "Показывать никнеймы ESP", function(state)
+    espShowNames = state
+end)
+
+-- ---------- Настройка цветов ESP (своя команда / чужая) ----------
+local espColorPresets = {
+    { name = "Зелёный", color = Color3.fromRGB(60, 200, 90) },
+    { name = "Красный", color = Color3.fromRGB(255, 60, 60) },
+    { name = "Синий", color = Color3.fromRGB(60, 140, 255) },
+    { name = "Жёлтый", color = Color3.fromRGB(255, 220, 60) },
+    { name = "Фиолетовый", color = Color3.fromRGB(180, 80, 255) },
+    { name = "Голубой", color = Color3.fromRGB(60, 230, 230) },
+}
+
+local function createColorPickerRow(parentPage, labelText, defaultColor, onPick)
+    local header = Instance.new("TextLabel")
+    header.Size = UDim2.new(1, 0, 0, 18)
+    header.BackgroundTransparency = 1
+    header.Text = labelText
+    header.TextColor3 = Color3.fromRGB(230, 230, 230)
+    header.Font = Enum.Font.Gotham
+    header.TextSize = 13
+    header.TextXAlignment = Enum.TextXAlignment.Left
+    header.LayoutOrder = nextLayoutOrder(parentPage)
+    header.Parent = parentPage
+
+	local currentColor = Instance.new("Frame")
+currentColor.Name = "CurrentColor"
+currentColor.Size = UDim2.new(0, 16, 0, 16)
+currentColor.Position = UDim2.new(1, -20, 0, 1)
+currentColor.AnchorPoint = Vector2.new(0, 0)
+currentColor.BackgroundColor3 = defaultColor
+currentColor.BorderSizePixel = 0
+currentColor.Parent = header
+
+Instance.new("UICorner", currentColor).CornerRadius = UDim.new(0, 4)
+
+    local paletteRow = Instance.new("Frame")
+    paletteRow.Size = UDim2.new(1, 0, 0, 28)
+    paletteRow.BackgroundTransparency = 1
+    paletteRow.LayoutOrder = nextLayoutOrder(parentPage)
+    paletteRow.Parent = parentPage
+
+    local layout = Instance.new("UIListLayout")
+    layout.FillDirection = Enum.FillDirection.Horizontal
+    layout.Padding = UDim.new(0, 6)
+    layout.Parent = paletteRow
+
+    for _, preset in ipairs(espColorPresets) do
+        local swatch = Instance.new("TextButton")
+        swatch.Size = UDim2.new(0, 28, 0, 28)
+        swatch.BackgroundColor3 = preset.color
+        swatch.Text = ""
+        swatch.AutoButtonColor = false
+        swatch.Parent = paletteRow
+        Instance.new("UICorner", swatch).CornerRadius = UDim.new(0, 6)
+
+        swatch.MouseButton1Click:Connect(function()
+         currentColor.BackgroundColor3 = preset.color
+         onPick(preset.color)
+        end)
+    end
+end
+
+createColorPickerRow(worldPage, "Цвет ESP — своя команда", espTeamColor, function(color)
+    espTeamColor = color
+    if espEnabled then refreshESP() end
+end)
+
+createColorPickerRow(worldPage, "Цвет ESP — чужая команда", espEnemyColor, function(color)
+    espEnemyColor = color
+    if espEnabled then refreshESP() end
+end)
+
+createColorPickerRow(worldPage, "Цвет ESP — чужая команда 2", espEnemyColor2, function(color)
+    espEnemyColor2 = color
+    if espEnabled then refreshESP() end
+end)
+
+createColorPickerRow(worldPage, "Цвет ESP — чужая команда 3", espEnemyColor3, function(color)
+    espEnemyColor3 = color
+    if espEnabled then refreshESP() end
+end)
+
+createColorPickerRow(worldPage, "Цвет ESP — чужая команда 4", espEnemyColor4, function(color)
+    espEnemyColor4 = color
+    if espEnabled then refreshESP() end
+end)
+
+createColorPickerRow(worldPage, "Цвет ESP — чужая команда 5", espEnemyColor5, function(color)
+    espEnemyColor5 = color
+    if espEnabled then refreshESP() end
+end)
+
+-- глобальный обработчик горячих клавиш для функций
+local hotkeyConn = UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if not running then return end
+    if gameProcessed then return end
+    if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+
+    for featureName, key in pairs(keybinds) do
+        if key == input.KeyCode and bindActions[featureName] then
+            bindActions[featureName]()
+        end
+    end
+end)
+table.insert(connections, hotkeyConn)
+
+-- ==================== Автосохранение настроек при смерти ====================
+-- Все включённые функции (ME/World/Freecam/Fly и т.д.) и значения ползунков
+-- сохраняются в файл при каждой смерти персонажа и подгружаются заново
+-- при следующем запуске скрипта (например после реджойна).
+local SETTINGS_FILE = "AdminMenuSettings_" .. tostring(game.PlaceId) .. ".json"
+
+local function collectSettings()
+    local character = player.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+
+    return {
+        walkSpeed = humanoid and humanoid.WalkSpeed or nil,
+        jumpPower = humanoid and humanoid.JumpPower or nil,
+        fov = workspace.CurrentCamera.FieldOfView,
+        freecamSpeed = freecamSpeed,
+        flySpeed = flySpeed,
+
+        slideBoost = slideBoostToggle,
+        freecamEnabled = freecamEnabled,
+        flyEnabled = flyEnabled,
+        godmodeEnabled = godmodeEnabled,
+        invisibleEnabled = invisible,
+        noclipEnabled = noclipEnabled,
+
+        espEnabled = espEnabled,
+        espShowNames = espShowNames,
+        espMaxDistance = espMaxDistance,
+        espTeamColor = { r = espTeamColor.R, g = espTeamColor.G, b = espTeamColor.B },
+        espEnemyColor = { r = espEnemyColor.R, g = espEnemyColor.G, b = espEnemyColor.B },
+    }
+end
+
+local function saveSettings()
+    pcall(function()
+        local json = HttpService:JSONEncode(collectSettings())
+        writefile(SETTINGS_FILE, json)
+    end)
+end
+
+createButtonRow(bindsPage, "💾 Сохранить настройки сейчас", function()
+    saveSettings()
+end)
+
+local function loadSettingsFile()
+    local ok, data = pcall(function()
+        if isfile and isfile(SETTINGS_FILE) then
+            return HttpService:JSONDecode(readfile(SETTINGS_FILE))
+        end
+        return nil
+    end)
+    if ok and data then
+        return data
+    end
+    return nil
+end
+
+-- применяет загруженные настройки к состоянию и синхронизирует
+-- кнопки/ползунки в меню, чтобы UI совпадал с реальным состоянием
+local function applySettings(data)
+    if not data then return end
+
+    if data.walkSpeed then setSpeedSlider(data.walkSpeed) end
+    if data.jumpPower then setJumpSlider(data.jumpPower) end
+    if data.fov then setFOVSlider(data.fov) end
+    if data.freecamSpeed then setFreecamSpeedSlider(data.freecamSpeed) end
+    if data.flySpeed then setFlySpeedSlider(data.flySpeed) end
+
+    if data.slideBoost ~= nil then setSlideBoostState(data.slideBoost) end
+    if data.freecamEnabled ~= nil then setFreecamState(data.freecamEnabled) end
+    if data.flyEnabled ~= nil then setFlyState(data.flyEnabled) end
+    if data.godmodeEnabled ~= nil then setGodmodeState(data.godmodeEnabled) end
+    if data.invisibleEnabled ~= nil then setInvisibleState(data.invisibleEnabled) end
+    if data.noclipEnabled ~= nil then setNoclipState(data.noclipEnabled) end
+
+    if data.espEnabled ~= nil then setESPState(data.espEnabled) end
+    if data.espShowNames ~= nil then setESPNamesState(data.espShowNames) end
+    if data.espMaxDistance then setESPDistanceSlider(data.espMaxDistance) end
+
+    if data.espTeamColor then
+        espTeamColor = Color3.new(data.espTeamColor.r, data.espTeamColor.g, data.espTeamColor.b)
+        if espEnabled then refreshESP() end
+    end
+    if data.espEnemyColor then
+        espEnemyColor = Color3.new(data.espEnemyColor.r, data.espEnemyColor.g, data.espEnemyColor.b)
+        if espEnabled then refreshESP() end
+    end
+end
+
+-- подписываемся на смерть персонажа (текущего и всех будущих респавнов)
+local function watchDeathForSave(character)
+    local humanoid = character:WaitForChild("Humanoid", 5)
+    if not humanoid then return end
+    table.insert(connections, humanoid.Died:Connect(function()
+        saveSettings()
+    end))
+end
+
+if player.Character then
+    watchDeathForSave(player.Character)
+end
+table.insert(connections, player.CharacterAdded:Connect(watchDeathForSave))
+
+-- загружаем и применяем сохранённые настройки сразу при запуске скрипта
+applySettings(loadSettingsFile())
+
+-- по умолчанию открываем ME
+selectTab("ME")
+
+-- ==================== Перетаскивание окна ====================
+local dragging = false
+local dragStart, startPos
+
+local function updateDrag(input)
+    local delta = input.Position - dragStart
+    mainFrame.Position = UDim2.new(
+        startPos.X.Scale, startPos.X.Offset + delta.X,
+        startPos.Y.Scale, startPos.Y.Offset + delta.Y
+    )
+end
+
+local dragBeganConn = topBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = mainFrame.Position
+
+        local changedConn
+        changedConn = input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+                if changedConn then changedConn:Disconnect() end
+            end
+        end)
+    end
+end)
+table.insert(connections, dragBeganConn)
+
+local dragChangedConn = topBar.InputChanged:Connect(function(input)
+    if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+        or input.UserInputType == Enum.UserInputType.Touch) then
+        updateDrag(input)
+    end
+end)
+table.insert(connections, dragChangedConn)
+
+-- ==================== Настройка звуков ====================
+
+-- Создаем звук в Workspace, чтобы игра думала, что это объект мира
+
+-- Создаем два звука: один на открытие, другой на закрытие
+local openSound = Instance.new("Sound", workspace)
+openSound.SoundId = "rbxassetid://140207837688369" -- Твой ID
+openSound.Volume = 1
+openSound.Name = "SlikoOpen"
+
+local closeSound = Instance.new("Sound", workspace)
+closeSound.SoundId = "rbxassetid://139800881181209" -- Можешь поменять ID, если хочешь другой звук
+closeSound.Volume = 1
+closeSound.Name = "SlikoClose"
+
+-- ==================== Анимация открытия/закрытия ====================
+local uiScale = Instance.new("UIScale")
+uiScale.Scale = 1
+uiScale.Parent = mainFrame
+
+local openTweenInfo = TweenInfo.new(0.25, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+local closeTweenInfo = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+
+local function animateOpen()
+    mainFrame.Visible = true
+    uiScale.Scale = 0
+    openSound:Play() -- ЭТОЙ СТРОКИ У ТЕБЯ НЕ ХВАТАЕТ
+    TweenService:Create(uiScale, openTweenInfo, { Scale = 1 }):Play()
+end
+
+local function animateClose(onComplete)
+    closeSound:Play() -- Звук при закрытии
+    local tween = TweenService:Create(uiScale, closeTweenInfo, { Scale = 0 })
+    local doneConn
+    doneConn = tween.Completed:Connect(function()
+        mainFrame.Visible = false
+        if doneConn then doneConn:Disconnect() end
+        if onComplete then onComplete() end
+    end)
+    tween:Play()
+end
+
+-- ==================== Полная остановка скрипта ====================
+local function stopScript()
+    running = false
+    clearESP()
+    for _, conn in ipairs(connections) do
+        if conn.Connected then
+            conn:Disconnect()
+        end
+    end
+    animateClose(function()
+        if screenGui then
+            screenGui:Destroy()
+        end
+    end)
+end
+
+closeButton.MouseButton1Click:Connect(stopScript)
+
+-- ==================== Insert для показать/скрыть ====================
+local menuVisible = true
+local inputConn = UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if not running then return end
+    if gameProcessed then return end
+    if input.KeyCode == Enum.KeyCode.Insert then
+        menuVisible = not menuVisible
+        if menuVisible then
+            animateOpen()
+        else
+            animateClose()
+        end
+    end
+end)
+table.insert(connections, inputConn)
+
+-- ==================== Зелёная плавающая кнопка показать/скрыть ====================
+-- Только для телефона - на ПК уже есть клавиша Insert, вторая кнопка
+-- показать/скрыть там не нужна и раньше появлялась ошибочно.
+if isMobile then
+local toggleButton = Instance.new("TextButton")
+toggleButton.Name = "MenuToggleButton"
+toggleButton.Size = UDim2.new(0, 44, 0, 44)
+toggleButton.Position = UDim2.new(0, 20, 0, 120)
+toggleButton.BackgroundColor3 = Color3.fromRGB(40, 170, 90)
+toggleButton.Text = "✕"
+toggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+toggleButton.Font = Enum.Font.GothamBold
+toggleButton.TextSize = 20
+toggleButton.ZIndex = 10
+toggleButton.Parent = screenGui
+Instance.new("UICorner", toggleButton).CornerRadius = UDim.new(1, 0)
+
+local toggleDragging = false
+local toggleDragStart, toggleStartPos, toggleMoved
+
+local toggleDragBeganConn = toggleButton.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+        toggleDragging = true
+        toggleMoved = false
+        toggleDragStart = input.Position
+        toggleStartPos = toggleButton.Position
+
+        local changedConn
+        changedConn = input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                toggleDragging = false
+                if changedConn then changedConn:Disconnect() end
+
+                -- если кнопку почти не сдвигали - считаем это кликом,
+                -- а не перетаскиванием, и переключаем видимость меню
+                if not toggleMoved then
+                    menuVisible = not menuVisible
+                    if menuVisible then
+                        animateOpen()
+                    else
+                        animateClose()
+                    end
+                end
+            end
+        end)
+    end
+end)
+table.insert(connections, toggleDragBeganConn)
+
+local toggleDragChangedConn = toggleButton.InputChanged:Connect(function(input)
+    if toggleDragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+        or input.UserInputType == Enum.UserInputType.Touch) then
+        local delta = input.Position - toggleDragStart
+        if delta.Magnitude > 5 then
+            toggleMoved = true
+        end
+        toggleButton.Position = UDim2.new(
+            toggleStartPos.X.Scale, toggleStartPos.X.Offset + delta.X,
+            toggleStartPos.Y.Scale, toggleStartPos.Y.Offset + delta.Y
+        )
+    end
+end)
+table.insert(connections, toggleDragChangedConn)
+end -- конец if isMobile (зелёная кнопка)
+
+-- ==================== Открытие сразу при запуске ====================
+animateOpen()
