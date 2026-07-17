@@ -124,9 +124,9 @@ local Window = Rayfield:CreateWindow({
     LoadingSubtitle = "В стадии разработки",
     Theme = prelaunchConfig.theme,
     ConfigurationSaving = {
-        Enabled = true,
-        FolderName = "SlikoHub",
-        FileName = "Settings_" .. tostring(game.PlaceId),
+    Enabled = true,
+    FolderName = "SlikoHub",
+    FileName = "Settings_" .. tostring(game.PlaceId),
     },
     Discord = { Enabled = false },
     KeySystem = false,
@@ -139,6 +139,7 @@ local TabPlayers = Window:CreateTab(L.Players)
 local TabSaves = Window:CreateTab(L.Saves)
 local TabVisuals = Window:CreateTab(L.Visuals)
 local TabAnims = Window:CreateTab(L.Anims)
+local TabBinds = Window:CreateTab("Бинды")
 local TabSettings = Window:CreateTab(L.Settings)
 
 task.wait()
@@ -175,7 +176,7 @@ local hudVisible = true
 -- ---- Session time / FPS (верх-лево, т.к. Rayfield не даёт встроить это в свой сайдбар) ----
 local sessionLabel = Instance.new("TextLabel")
 sessionLabel.AnchorPoint = Vector2.new(0, 0)
-sessionLabel.Position = UDim2.new(0, 14, 0, 14)
+sessionLabel.Position = UDim2.new(0.5, -120, 0, 20)
 sessionLabel.Size = UDim2.new(0, 240, 0, 26)
 sessionLabel.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
 sessionLabel.BackgroundTransparency = 0.5
@@ -1394,6 +1395,106 @@ for _, slot in ipairs(animateSlots) do
     })
 end
 
+-- ==================== Бинды ====================
+
+local function createBind(name, key, callback)
+
+    TabBinds:CreateKeybind({
+        Name = name,
+        CurrentKeybind = Enum.KeyCode[key],
+        HoldToInteract = false,
+        Flag = "Bind_" .. name,
+
+        Callback = function()
+            callback()
+
+            pcall(function()
+                Rayfield:SaveConfiguration()
+            end)
+        end,
+    })
+
+end
+
+
+createBind("ESP", "E", function()
+    espEnabled = not espEnabled
+
+    setFeatureStatus("ESP", espEnabled)
+
+    if espEnabled then
+        refreshESP()
+    else
+        clearESP()
+    end
+
+    playToggleSound()
+end)
+
+
+createBind("Fly", "F", function()
+
+    flyEnabled = not flyEnabled
+
+    setFeatureStatus("Полёт", flyEnabled)
+
+    if flyEnabled then
+        startFly()
+    else
+        stopFly()
+    end
+
+    playToggleSound()
+
+end)
+
+
+createBind("Freecam", "C", function()
+
+    freecamEnabled = not freecamEnabled
+
+    setFeatureStatus("Freecam", freecamEnabled)
+
+    if freecamEnabled then
+        startFreecam()
+    else
+        stopFreecam()
+    end
+
+    playToggleSound()
+
+end)
+
+
+createBind("Noclip", "N", function()
+
+    noclipEnabled = not noclipEnabled
+
+    setFeatureStatus("Ноуклип", noclipEnabled)
+
+    applyNoclip(player.Character)
+
+    playToggleSound()
+
+end)
+
+
+createBind("Infinite Jump", "J", function()
+
+    infiniteJumpEnabled = not infiniteJumpEnabled
+
+    setFeatureStatus("Infinite Jump", infiniteJumpEnabled)
+
+    playToggleSound()
+
+end)
+
+
+TabBinds:CreateParagraph({
+    Title = "Sliko Hub Binds",
+    Content = "Клавиши быстрого включения функций"
+})
+
 -- ==================== Настройки ====================
 TabSettings:CreateToggle({
     Name = "Показывать HUD (Session/FPS/активные функции)",
@@ -1442,7 +1543,7 @@ TabSettings:CreateToggle({
 TabSettings:CreateDropdown({
     Name = "Тема",
     Options = { "Default", "Ocean", "AmberGlow", "Bloom", "DarkBlue", "Green", "Red" },
-    CurrentOption = { prelaunchConfig.theme },
+    CurrentOption = prelaunchConfig.theme,
     Flag = "Settings_Theme",
     Callback = function(option)
         local name = type(option) == "table" and option[1] or option
@@ -1453,10 +1554,10 @@ TabSettings:CreateDropdown({
         Rayfield:Notify({
             Title = "Тема",
             Content = "Перезапуск меню...",
-            Duration = 1.5
+            Duration = 1
         })
 
-        task.wait(1.5)
+        task.wait(1)
 
         pcall(function()
             Rayfield:Destroy()
@@ -1464,7 +1565,7 @@ TabSettings:CreateDropdown({
 
         task.wait(0.2)
 
-        loadstring(game:HttpGet("https://raw.githubusercontent.com/Fructozi/Admin-Menu/main/Admin_menu.lua"))()
+        loadstring(game:HttpGet("https://raw.githubusercontent.com/Fructozi/Admin-Menu/main/Admin_menu"))()
     end,
 })
 
