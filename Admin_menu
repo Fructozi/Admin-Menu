@@ -127,7 +127,7 @@ local Window = Rayfield:CreateWindow({
     Enabled = true,
     FolderName = "SlikoHub",
     FileName = "Settings_" .. tostring(game.PlaceId),
-    },
+  },
     Discord = { Enabled = false },
     KeySystem = false,
 })
