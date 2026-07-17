@@ -124,10 +124,10 @@ local Window = Rayfield:CreateWindow({
     LoadingSubtitle = "В стадии разработки",
     Theme = prelaunchConfig.theme,
     ConfigurationSaving = {
-    Enabled = true,
-    FolderName = "SlikoHub",
-    FileName = "Settings_" .. tostring(game.PlaceId),
-  },
+        Enabled = true,
+        FolderName = "SlikoHub",
+        FileName = "Settings_" .. tostring(game.PlaceId),
+    },
     Discord = { Enabled = false },
     KeySystem = false,
 })
