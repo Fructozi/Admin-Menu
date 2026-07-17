@@ -1543,7 +1543,7 @@ TabSettings:CreateDropdown({
 
         task.wait(0.2)
 
-        loadstring(game:HttpGet("https://raw.githubusercontent.com/Fructozi/Admin-Menu/main/Admin_menu"))()
+        loadstring(game:HttpGet("https://raw.githubusercontent.com/Fructozi/Admin-Menu/refs/heads/main/Admin_menu"))()
     end,
 })
 
