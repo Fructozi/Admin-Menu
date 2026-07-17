@@ -1420,73 +1420,44 @@ end
 createBind("ESP", "E", function()
     espEnabled = not espEnabled
 
-    setFeatureStatus("ESP", espEnabled)
-
     if espEnabled then
         refreshESP()
     else
         clearESP()
     end
-
-    playToggleSound()
 end)
 
 
 createBind("Fly", "F", function()
-
     flyEnabled = not flyEnabled
-
-    setFeatureStatus("Полёт", flyEnabled)
 
     if flyEnabled then
         startFly()
     else
         stopFly()
     end
-
-    playToggleSound()
-
 end)
 
 
 createBind("Freecam", "C", function()
-
     freecamEnabled = not freecamEnabled
-
-    setFeatureStatus("Freecam", freecamEnabled)
 
     if freecamEnabled then
         startFreecam()
     else
         stopFreecam()
     end
-
-    playToggleSound()
-
 end)
 
 
 createBind("Noclip", "N", function()
-
     noclipEnabled = not noclipEnabled
-
-    setFeatureStatus("Ноуклип", noclipEnabled)
-
     applyNoclip(player.Character)
-
-    playToggleSound()
-
 end)
 
 
 createBind("Infinite Jump", "J", function()
-
     infiniteJumpEnabled = not infiniteJumpEnabled
-
-    setFeatureStatus("Infinite Jump", infiniteJumpEnabled)
-
-    playToggleSound()
-
 end)
 
 
